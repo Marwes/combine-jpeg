@@ -1,5 +1,6 @@
 use combine::{
-    parser::{byte::byte, item::satisfy_map},
+    easy,
+    parser::{byte::byte, item::satisfy_map, repeat::many1},
     ParseError, Parser, RangeStream,
 };
 
@@ -24,14 +25,19 @@ where
     byte(0xFF).with(satisfy_map(|b| {
         Some(match b {
             0xD8 => Marker::SOI,
+            0xDB => Marker::DQT,
             _ => return None,
         })
     }))
 }
 
-pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), ()> {
-    let mut parser = marker();
-    parser.parse(input).map(|_| ()).map_err(|_| ())
+pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String, String, usize>> {
+    let mut parser = many1::<Vec<_>, _>(marker());
+    parser.easy_parse(input).map(|_| ()).map_err(|err| {
+        err.map_position(|pos| pos.translate_position(input))
+            .map_token(|token| format!("0x{:X}", token))
+            .map_range(|range| format!("{:?}", range))
+    })
 }
 
 #[cfg(test)]
@@ -40,6 +46,6 @@ mod tests {
 
     #[test]
     fn it_works() {
-        assert!(decode(include_bytes!("../img0.jpg"), &mut [0; 128]).is_ok());
+        assert_eq!(decode(include_bytes!("../img0.jpg"), &mut [0; 128]), Ok(()));
     }
 }

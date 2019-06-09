@@ -1,10 +1,10 @@
 use combine::{
-    easy,
+    ctry, easy,
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
         item::{any, eof, satisfy_map, value},
         range::{take, take_while1},
-        repeat::many1,
+        repeat::{many1, sep_by1},
     },
     stream::FullRangeStream,
     ParseError, Parser,
@@ -33,20 +33,44 @@ where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    take_until_byte(0xFF) // mozjpeg skips any non marker bytes (non 0xFF)
-        .skip(take_while1(|b| b == 0xFF)) // Extraenous 0xFF bytes are allowed
-        .with(
-            satisfy_map(|b| {
-                Some(match b {
-                    0xD8 => Marker::SOI,
-                    0xC4 => Marker::DHT,
-                    0xDB => Marker::DQT,
-                    0xE0...0xEF => Marker::APP(b - 0xE0),
-                    _ => return None,
-                })
+    #[derive(Clone)]
+    pub struct Sink;
+
+    impl Default for Sink {
+        fn default() -> Self {
+            Sink
+        }
+    }
+
+    impl<A> Extend<A> for Sink {
+        fn extend<T>(&mut self, iter: T)
+        where
+            T: IntoIterator<Item = A>,
+        {
+            for _ in iter {}
+        }
+    }
+
+    sep_by1::<Sink, _, _>(
+        (
+            take_until_byte(0xFF),      // mozjpeg skips any non marker bytes (non 0xFF)
+            take_while1(|b| b == 0xFF), // Extraenous 0xFF bytes are allowed
+        ),
+        byte(0x00).expected("stuffed zero"), // When we encounter a 0x00, we found a stuffed zero (FF/00) sequence so we search again
+    )
+    .with(
+        satisfy_map(|b| {
+            Some(match b {
+                0xD8 => Marker::SOI,
+                0xC4 => Marker::DHT,
+                0xDB => Marker::DQT,
+                0xD0...0xD7 => Marker::RST(b - 0xD0),
+                0xE0...0xEF => Marker::APP(b - 0xE0),
+                _ => return None,
             })
-            .expected("marker"),
-        )
+        })
+        .expected("marker"),
+    )
 }
 
 #[derive(Copy, Clone)]
@@ -61,7 +85,7 @@ where
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     marker().then_partial(|&mut marker| match marker {
-        Marker::SOI => value(Segment { marker, data: &[] }).left(),
+        Marker::SOI | Marker::RST(_) => value(Segment { marker, data: &[] }).left(),
         Marker::DHT | Marker::DQT | Marker::APP(_) => be_u16()
             .then(|quantization_table_len| take(quantization_table_len.into()))
             .map(move |data| Segment { marker, data })
@@ -100,7 +124,7 @@ where
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     match segment.marker {
-        Marker::SOI => Ok(()),
+        Marker::SOI | Marker::RST(_) => Ok(()),
         Marker::DHT => dht().parse(I::from(segment.data)).map(|_| ()),
         Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
         Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),

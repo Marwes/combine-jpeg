@@ -1,12 +1,13 @@
 use combine::{
     easy,
     parser::{
-        byte::{byte, num::be_u16},
-        item::{satisfy_map, value},
-        range::take,
+        byte::{byte, num::be_u16, take_until_byte},
+        item::{any, eof, satisfy_map, value},
+        range::{take, take_while1},
         repeat::many1,
     },
-    ParseError, Parser, RangeStream,
+    stream::FullRangeStream,
+    ParseError, Parser,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -25,16 +26,18 @@ enum Marker {
 
 fn marker<'a, I>() -> impl Parser<Output = Marker, Input = I>
 where
-    I: RangeStream<Item = u8, Range = &'a [u8]>,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    byte(0xFF).with(satisfy_map(|b| {
-        Some(match b {
-            0xD8 => Marker::SOI,
-            0xDB => Marker::DQT,
-            _ => return None,
-        })
-    }))
+    take_until_byte(0xFF) // mozjpeg skips any non marker bytes (non 0xFF)
+        .skip(take_while1(|b| b == 0xFF)) // Extraenous 0xFF bytes are allowed
+        .with(satisfy_map(|b| {
+            Some(match b {
+                0xD8 => Marker::SOI,
+                0xDB => Marker::DQT,
+                _ => return None,
+            })
+        }))
 }
 
 #[derive(Copy, Clone)]
@@ -45,26 +48,52 @@ struct Segment<'a> {
 
 fn segment<'a, I>() -> impl Parser<Output = Segment<'a>, Input = I>
 where
-    I: RangeStream<Item = u8, Range = &'a [u8]>,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     marker().then_partial(|&mut marker| match marker {
         Marker::SOI => value(Segment { marker, data: &[] }).left(),
         Marker::DQT => be_u16()
-            .then(|i| take(i.into()))
+            .then(|quantization_table_len| take(quantization_table_len.into()))
             .map(move |data| Segment { marker, data })
             .right(),
         _ => panic!("Unhandled marker {:?}", marker),
     })
 }
 
+fn dqt<'a, I>() -> impl Parser<Output = (), Input = I>
+where
+    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+{
+    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+}
+
+fn do_segment<'a, I>(segment: Segment<'a>) -> Result<(), I::Error>
+where
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]>,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+{
+    match segment.marker {
+        Marker::SOI => Ok(()),
+        Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
+        _ => panic!("Unhandled segment {:?}", segment.marker),
+    }
+}
+
 pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String, String, usize>> {
-    let mut parser = many1::<Vec<_>, _>(segment());
-    parser.easy_parse(input).map(|_| ()).map_err(|err| {
-        err.map_position(|pos| pos.translate_position(input))
-            .map_token(|token| format!("0x{:X}", token))
-            .map_range(|range| format!("{:?}", range))
-    })
+    let mut parser = many1::<Vec<_>, _>(
+        segment().flat_map(|segment| do_segment::<easy::Stream<&[u8]>>(segment)),
+    )
+    .skip(eof());
+    parser
+        .easy_parse(input)
+        .map(|(_, _rest)| ())
+        .map_err(|err| {
+            err.map_position(|pos| pos.translate_position(input))
+                .map_token(|token| format!("0x{:X}", token))
+                .map_range(|range| format!("{:?}", range))
+        })
 }
 
 #[cfg(test)]

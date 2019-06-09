@@ -1,0 +1,10 @@
+[package]
+name = "combine-jpeg"
+version = "0.1.0"
+authors = ["Markus Westerlind <marwes91@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+combine = "4.0.0-alpha.1"

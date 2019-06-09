@@ -66,6 +66,7 @@ where
                 0xDB => Marker::DQT,
                 0xD0...0xD7 => Marker::RST(b - 0xD0),
                 0xE0...0xEF => Marker::APP(b - 0xE0),
+                0xD9 => Marker::EOI,
                 _ => return None,
             })
         })
@@ -85,7 +86,7 @@ where
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     marker().then_partial(|&mut marker| match marker {
-        Marker::SOI | Marker::RST(_) => value(Segment { marker, data: &[] }).left(),
+        Marker::SOI | Marker::RST(_) | Marker::EOI => value(Segment { marker, data: &[] }).left(),
         Marker::DHT | Marker::DQT | Marker::APP(_) => be_u16()
             .then(|quantization_table_len| take(quantization_table_len.into()))
             .map(move |data| Segment { marker, data })
@@ -124,7 +125,7 @@ where
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     match segment.marker {
-        Marker::SOI | Marker::RST(_) => Ok(()),
+        Marker::SOI | Marker::RST(_) | Marker::EOI => Ok(()),
         Marker::DHT => dht().parse(I::from(segment.data)).map(|_| ()),
         Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
         Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),

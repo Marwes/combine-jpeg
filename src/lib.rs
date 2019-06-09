@@ -10,7 +10,7 @@ use combine::{
     ParseError, Parser,
 };
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Marker {
     SOI,
     SOF(u8),
@@ -24,6 +24,10 @@ enum Marker {
     EOI,
 }
 
+impl Marker {
+    const APP_ADOBE: Marker = Marker::APP(14);
+}
+
 fn marker<'a, I>() -> impl Parser<Output = Marker, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
@@ -35,6 +39,7 @@ where
             Some(match b {
                 0xD8 => Marker::SOI,
                 0xDB => Marker::DQT,
+                0xE0...0xEF => Marker::APP(b - 0xE0),
                 _ => return None,
             })
         }))
@@ -53,7 +58,7 @@ where
 {
     marker().then_partial(|&mut marker| match marker {
         Marker::SOI => value(Segment { marker, data: &[] }).left(),
-        Marker::DQT => be_u16()
+        Marker::DQT | Marker::APP(_) => be_u16()
             .then(|quantization_table_len| take(quantization_table_len.into()))
             .map(move |data| Segment { marker, data })
             .right(),
@@ -69,6 +74,14 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
+fn app_adobe<'a, I>() -> impl Parser<Output = (), Input = I>
+where
+    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+{
+    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+}
+
 fn do_segment<'a, I>(segment: Segment<'a>) -> Result<(), I::Error>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]>,
@@ -77,6 +90,7 @@ where
     match segment.marker {
         Marker::SOI => Ok(()),
         Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
+        Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
         _ => panic!("Unhandled segment {:?}", segment.marker),
     }
 }

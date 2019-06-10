@@ -1,14 +1,14 @@
 use combine::{
     easy,
     error::{Consumed, ParseError, StreamError},
+    parser,
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
-        function::parser,
         item::{any, eof, satisfy_map, value},
         range::{take, take_while1},
         repeat::{count_min_max, many1, sep_by1},
     },
-    stream::{FullRangeStream, Positioned, StreamErrorFor},
+    stream::{FullRangeStream, StreamErrorFor},
     Parser,
 };
 
@@ -287,27 +287,42 @@ struct SOS {
 }
 
 struct ScanHeader {
-    component_selector: u8,
+    component_index: u8,
     dc_table_selector: u8,
     ac_table_selector: u8,
 }
 
-fn sos<'a, I>(frame: &Frame) -> impl Parser<Output = SOS, Input = I>
-where
+parser! {
+fn sos['a, 'f, I](frame: &'f Frame)(I) -> SOS
+where [
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
+]
 {
+    let frame = *frame;
     (
-        any().then_partial(|&mut image_components| {
+        any().then_partial(move |&mut image_components| {
             let image_components = usize::from(image_components);
             count_min_max::<Vec<_>, _>(
                 image_components,
                 image_components,
-                (any(), split_4_bit()).map(
-                    |(component_selector, (dc_table_selector, ac_table_selector))| ScanHeader {
-                        component_selector,
-                        dc_table_selector,
-                        ac_table_selector,
+                (any(), split_4_bit()).and_then(
+                    move |(component_identifier, (dc_table_selector, ac_table_selector))| -> Result<_, StreamErrorFor<I>> {
+                        debug_assert!(frame.0.len() <= 256);
+                        let component_index = frame
+                            .0
+                            .iter()
+                            .position(|c| c.component_identifier == component_identifier)
+                            .ok_or_else(|| {
+                                StreamErrorFor::<I>::message_static_message(
+                                    "Component does not exist in frame",
+                                )
+                            })? as u8;
+                        Ok(ScanHeader {
+                            component_index,
+                            dc_table_selector,
+                            ac_table_selector,
+                        })
                     },
                 ),
             )
@@ -330,6 +345,7 @@ where
                 low_approximation,
             },
         )
+}
 }
 
 fn app_adobe<'a, I>() -> impl Parser<Output = (), Input = I>

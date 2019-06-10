@@ -274,12 +274,58 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
-fn sos<'a, I>() -> impl Parser<Output = (), Input = I>
+struct SOS {
+    headers: Vec<ScanHeader>,
+    start_of_selection: u8,
+    end_of_selection: u8,
+    high_approximation: u8,
+    low_approximation: u8,
+}
+
+struct ScanHeader {
+    component_selector: u8,
+    dc_table_selector: u8,
+    ac_table_selector: u8,
+}
+
+fn sos<'a, I>() -> impl Parser<Output = SOS, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+    (
+        any().then_partial(|&mut image_components| {
+            let image_components = usize::from(image_components);
+            count_min_max::<Vec<_>, _>(
+                image_components,
+                image_components,
+                (any(), split_4_bit()).map(
+                    |(component_selector, (dc_table_selector, ac_table_selector))| ScanHeader {
+                        component_selector,
+                        dc_table_selector,
+                        ac_table_selector,
+                    },
+                ),
+            )
+        }),
+        any(),
+        any(),
+        split_4_bit(),
+    )
+        .map(
+            |(
+                headers,
+                start_of_selection,
+                end_of_selection,
+                (high_approximation, low_approximation),
+            )| SOS {
+                headers,
+                start_of_selection,
+                end_of_selection,
+                high_approximation,
+                low_approximation,
+            },
+        )
 }
 
 fn app_adobe<'a, I>() -> impl Parser<Output = (), Input = I>

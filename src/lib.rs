@@ -1,6 +1,6 @@
 use combine::{
     easy,
-    error::{Consumed, StreamError},
+    error::{Consumed, ParseError, StreamError},
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
         function::parser,
@@ -8,8 +8,8 @@ use combine::{
         range::{take, take_while1},
         repeat::{count_min_max, many1, sep_by1},
     },
-    stream::{FullRangeStream, StreamErrorFor},
-    ParseError, Parser,
+    stream::{FullRangeStream, Positioned, StreamErrorFor},
+    Parser,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -120,15 +120,15 @@ where
     })
 }
 
-struct ComponentSpecifications([ComponentSpecification; 256]);
+struct Frame([ComponentSpecification; 256]);
 
-impl Default for ComponentSpecifications {
+impl Default for Frame {
     fn default() -> Self {
         Self([ComponentSpecification::default(); 256])
     }
 }
 
-impl Extend<ComponentSpecification> for ComponentSpecifications {
+impl Extend<ComponentSpecification> for Frame {
     fn extend<T>(&mut self, iter: T)
     where
         T: IntoIterator<Item = ComponentSpecification>,
@@ -147,7 +147,7 @@ struct ComponentSpecification {
     quantization_table_destination_selector: u8,
 }
 
-fn sof0<'a, I>() -> impl Parser<Output = (), Input = I>
+fn sof0<'a, I>() -> impl Parser<Output = Frame, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -155,34 +155,32 @@ where
     sof2()
 }
 
-fn sof2<'a, I>() -> impl Parser<Output = (), Input = I>
+fn sof2<'a, I>() -> impl Parser<Output = Frame, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    (any(), be_u16(), be_u16(), any())
-        .then_partial(
-            |&mut (precision, lines, samples_per_line, components_in_frame)| {
-                let component = (any(), split_4_bit(), any()).map(
-                    |(
-                        component_identifier,
-                        (horizontal_sampling_factor, vertical_sampling_factor),
-                        quantization_table_destination_selector,
-                    )| ComponentSpecification {
-                        component_identifier,
-                        horizontal_sampling_factor,
-                        vertical_sampling_factor,
-                        quantization_table_destination_selector,
-                    },
-                );
-                count_min_max::<ComponentSpecifications, _>(
-                    usize::from(components_in_frame),
-                    usize::from(components_in_frame),
-                    component,
-                )
-            },
-        )
-        .with(value(()))
+    (any(), be_u16(), be_u16(), any()).then_partial(
+        |&mut (precision, lines, samples_per_line, components_in_frame)| {
+            let component = (any(), split_4_bit(), any()).map(
+                |(
+                    component_identifier,
+                    (horizontal_sampling_factor, vertical_sampling_factor),
+                    quantization_table_destination_selector,
+                )| ComponentSpecification {
+                    component_identifier,
+                    horizontal_sampling_factor,
+                    vertical_sampling_factor,
+                    quantization_table_destination_selector,
+                },
+            );
+            count_min_max::<Frame, _>(
+                usize::from(components_in_frame),
+                usize::from(components_in_frame),
+                component,
+            )
+        },
+    )
 }
 
 struct HuffmanTable {
@@ -294,7 +292,7 @@ struct ScanHeader {
     ac_table_selector: u8,
 }
 
-fn sos<'a, I>() -> impl Parser<Output = SOS, Input = I>
+fn sos<'a, I>(frame: &Frame) -> impl Parser<Output = SOS, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -342,27 +340,50 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
-fn do_segment<'a, I>(segment: Segment<'a>) -> Result<(), I::Error>
-where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-{
-    match segment.marker {
-        Marker::SOI | Marker::RST(_) | Marker::EOI => Ok(()),
-        Marker::SOF(0) => sof0().parse(I::from(segment.data)).map(|_| ()),
-        Marker::SOF(2) => sof2().parse(I::from(segment.data)).map(|_| ()),
-        Marker::DHT => dht().parse(I::from(segment.data)).map(|_| ()),
-        Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
-        Marker::DRI => dri().parse(I::from(segment.data)).map(|_| ()),
-        Marker::SOS => sos().parse(I::from(segment.data)).map(|_| ()),
-        Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
-        _ => panic!("Unhandled segment {:?}", segment.marker),
+struct Decoder {
+    frame: Option<Frame>,
+}
+
+impl Decoder {
+    fn do_segment<'a, I>(&mut self, segment: Segment<'a>) -> Result<(), I::Error>
+    where
+        I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+    {
+        match segment.marker {
+            Marker::SOI | Marker::RST(_) | Marker::EOI => Ok(()),
+            Marker::SOF(0) => {
+                self.frame = Some(sof0().parse(I::from(segment.data))?.0);
+                Ok(())
+            }
+            Marker::SOF(2) => {
+                self.frame = Some(sof2().parse(I::from(segment.data))?.0);
+                Ok(())
+            }
+            Marker::DHT => dht().parse(I::from(segment.data)).map(|_| ()),
+            Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
+            Marker::DRI => dri().parse(I::from(segment.data)).map(|_| ()),
+            Marker::SOS => {
+                let input = I::from(segment.data);
+                let frame = self.frame.as_ref().ok_or_else(|| {
+                    I::Error::from_error(
+                        input.position(),
+                        StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
+                    )
+                })?;
+                sos(frame).parse(input).map(|_| ())
+            }
+            Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
+            _ => panic!("Unhandled segment {:?}", segment.marker),
+        }
     }
 }
 
 pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String, String, usize>> {
+    let mut decoder = Decoder { frame: None };
+
     let mut parser = many1::<Vec<_>, _>(
-        segment().flat_map(|segment| do_segment::<easy::Stream<&[u8]>>(segment)),
+        segment().flat_map(|segment| decoder.do_segment::<easy::Stream<&[u8]>>(segment)),
     )
     .skip(eof());
     parser

@@ -1,8 +1,9 @@
 use combine::{
     easy,
-    error::StreamError,
+    error::{Consumed, StreamError},
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
+        function::parser,
         item::{any, eof, satisfy_map, value},
         range::{take, take_while1},
         repeat::{count_min_max, many1, sep_by1},
@@ -120,12 +121,27 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
-fn dht<'a, I>() -> impl Parser<Output = (), Input = I>
+struct HuffmanTable {
+    values: [u8; 16],
+}
+
+fn dht<'a, I>() -> impl Parser<Output = (), Input = I> + 'a
 where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+    (any().map(|b| (b & 0x0F, b >> 4)), take(16))
+        .then_partial(
+            |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8])| {
+                parser(move |input: &mut I| {
+                    for &len in code_lengths {
+                        let (input_slice, _) = take(len.into()).parse_lazy(input).into_result()?;
+                    }
+                    Ok(((), Consumed::Consumed(())))
+                })
+            },
+        )
+        .with(value(()))
 }
 
 struct DQT([u16; 64]);

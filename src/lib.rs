@@ -120,11 +120,29 @@ where
     })
 }
 
-struct Frame([ComponentSpecification; 256]);
+#[derive(Default)]
+struct Dimensions {
+    width: u16,
+    height: u16,
+}
+
+struct Frame {
+    precision: u8,
+    lines: u16,
+    samples_per_line: u16,
+    mcu_size: Dimensions,
+    components: [ComponentSpecification; 256],
+}
 
 impl Default for Frame {
     fn default() -> Self {
-        Self([ComponentSpecification::default(); 256])
+        Self {
+            precision: 0,
+            lines: 0,
+            samples_per_line: 0,
+            mcu_size: Default::default(),
+            components: [ComponentSpecification::default(); 256],
+        }
     }
 }
 
@@ -133,9 +151,15 @@ impl Extend<ComponentSpecification> for Frame {
     where
         T: IntoIterator<Item = ComponentSpecification>,
     {
-        for (to, from) in self.0.iter_mut().zip(iter) {
+        for (to, from) in self.components.iter_mut().zip(iter) {
             *to = from;
         }
+    }
+}
+
+impl Frame {
+    fn component_width(&self, index: usize) -> u16 {
+        self.mcu_size.width * u16::from(self.components[index].horizontal_sampling_factor)
     }
 }
 
@@ -179,6 +203,33 @@ where
                 usize::from(components_in_frame),
                 component,
             )
+            .map(move |mut frame| {
+                frame.precision = precision;
+                frame.lines = lines;
+                frame.samples_per_line = samples_per_line;
+
+                {
+                    let h_max = frame
+                        .components
+                        .iter()
+                        .map(|c| c.horizontal_sampling_factor)
+                        .max()
+                        .unwrap();
+                    let width = (f32::from(samples_per_line) / (f32::from(h_max) as f32 * 8.0))
+                        .ceil() as u16;
+                    let v_max = frame
+                        .components
+                        .iter()
+                        .map(|c| c.vertical_sampling_factor)
+                        .max()
+                        .unwrap();
+                    let height = (f32::from(lines) / (f32::from(v_max) as f32 * 8.0)).ceil() as u16;
+
+                    frame.mcu_size = Dimensions { width, height };
+                }
+
+                frame
+            })
         },
     )
 }
@@ -308,9 +359,9 @@ where [
                 image_components,
                 (any(), split_4_bit()).and_then(
                     move |(component_identifier, (dc_table_selector, ac_table_selector))| -> Result<_, StreamErrorFor<I>> {
-                        debug_assert!(frame.0.len() <= 256);
+                        debug_assert!(frame.components.len() <= 256);
                         let component_index = frame
-                            .0
+                            .components
                             .iter()
                             .position(|c| c.component_identifier == component_identifier)
                             .ok_or_else(|| {
@@ -356,11 +407,18 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
+#[derive(Default)]
 struct Decoder {
     frame: Option<Frame>,
+    sos: Option<SOS>,
 }
 
 impl Decoder {
+    fn decode(&self) {
+        let frame = self.frame.as_ref().unwrap();
+        let sos = self.sos.as_ref().unwrap();
+    }
+
     fn do_segment<'a, I>(&mut self, segment: Segment<'a>) -> Result<(), I::Error>
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
@@ -387,7 +445,9 @@ impl Decoder {
                         StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
                     )
                 })?;
-                sos(frame).parse(input).map(|_| ())
+                self.sos = Some(sos(frame).parse(input)?.0);
+                self.decode();
+                Ok(())
             }
             Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
             _ => panic!("Unhandled segment {:?}", segment.marker),
@@ -396,20 +456,31 @@ impl Decoder {
 }
 
 pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String, String, usize>> {
-    let mut decoder = Decoder { frame: None };
+    let mut decoder = Decoder::default();
 
     let mut parser = many1::<Vec<_>, _>(
         segment().flat_map(|segment| decoder.do_segment::<easy::Stream<&[u8]>>(segment)),
     )
     .skip(eof());
-    parser
-        .easy_parse(input)
-        .map(|(_, _rest)| ())
-        .map_err(|err| {
-            err.map_position(|pos| pos.translate_position(input))
-                .map_token(|token| format!("0x{:X}", token))
-                .map_range(|range| format!("{:?}", range))
-        })
+    parser.easy_parse(input).map_err(|err| {
+        err.map_position(|pos| pos.translate_position(input))
+            .map_token(|token| format!("0x{:X}", token))
+            .map_range(|range| format!("{:?}", range))
+    })?;
+
+    let frame = decoder.frame.unwrap(); // FIXME
+    let component = &frame.components[0];
+
+    let line_stride = usize::from(frame.component_width(0));
+    let height = usize::from(frame.lines);
+    let width = usize::from(frame.samples_per_line);
+
+    for y in 0..height {
+        for x in 0..width {
+            // output[y * width + height] = data[y * line_stride + x];
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

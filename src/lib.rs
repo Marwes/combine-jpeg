@@ -15,6 +15,13 @@ use combine::{
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Marker {
     SOI,
+    // SOF 0 : Baseline DCT
+    // SOF 1 : Extended sequential DCT, Huffman coding
+    // SOF 2 : Progressive DCT, Huffman coding
+    // SOF 3 : Lossless (sequential), Huffman coding
+    // SOF 9 : Extended sequential DCT, arithmetic coding
+    // SOF 10 : Progressive DCT, arithmetic coding
+    // SOF 11 : Lossless (sequential), arithmetic coding
     SOF(u8),
     DHT,
     DQT,
@@ -79,6 +86,14 @@ where
     )
 }
 
+fn split_4_bit<'a, I>() -> impl Parser<Output = (u8, u8), Input = I>
+where
+    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+{
+    any().map(|b| (b & 0x0F, b >> 4))
+}
+
 #[derive(Copy, Clone)]
 struct Segment<'a> {
     marker: Marker,
@@ -105,12 +120,39 @@ where
     })
 }
 
+struct ComponentSpecifications([ComponentSpecification; 256]);
+
+impl Default for ComponentSpecifications {
+    fn default() -> Self {
+        Self([ComponentSpecification::default(); 256])
+    }
+}
+
+impl Extend<ComponentSpecification> for ComponentSpecifications {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = ComponentSpecification>,
+    {
+        for (to, from) in self.0.iter_mut().zip(iter) {
+            *to = from;
+        }
+    }
+}
+
+#[derive(Copy, Clone, Default)]
+struct ComponentSpecification {
+    component_identifier: u8,
+    horizontal_sampling_factor: u8,
+    vertical_sampling_factor: u8,
+    quantization_table_destination_selector: u8,
+}
+
 fn sof0<'a, I>() -> impl Parser<Output = (), Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+    sof2()
 }
 
 fn sof2<'a, I>() -> impl Parser<Output = (), Input = I>
@@ -118,7 +160,29 @@ where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+    (any(), be_u16(), be_u16(), any())
+        .then_partial(
+            |&mut (precision, lines, samples_per_line, components_in_frame)| {
+                let component = (any(), split_4_bit(), any()).map(
+                    |(
+                        component_identifier,
+                        (horizontal_sampling_factor, vertical_sampling_factor),
+                        quantization_table_destination_selector,
+                    )| ComponentSpecification {
+                        component_identifier,
+                        horizontal_sampling_factor,
+                        vertical_sampling_factor,
+                        quantization_table_destination_selector,
+                    },
+                );
+                count_min_max::<ComponentSpecifications, _>(
+                    usize::from(components_in_frame),
+                    usize::from(components_in_frame),
+                    component,
+                )
+            },
+        )
+        .with(value(()))
 }
 
 struct HuffmanTable {
@@ -130,7 +194,7 @@ where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    (any().map(|b| (b & 0x0F, b >> 4)), take(16))
+    (split_4_bit(), take(16))
         .then_partial(
             |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8])| {
                 parser(move |input: &mut I| {

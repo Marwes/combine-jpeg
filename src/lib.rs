@@ -1,12 +1,13 @@
 use combine::{
-    ctry, easy,
+    easy,
+    error::StreamError,
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
         item::{any, eof, satisfy_map, value},
         range::{take, take_while1},
-        repeat::{many1, sep_by1},
+        repeat::{count_min_max, many1, sep_by1},
     },
-    stream::FullRangeStream,
+    stream::{FullRangeStream, StreamErrorFor},
     ParseError, Parser,
 };
 
@@ -127,12 +128,62 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
-fn dqt<'a, I>() -> impl Parser<Output = (), Input = I>
+struct DQT([u16; 64]);
+
+impl Default for DQT {
+    fn default() -> Self {
+        DQT([0; 64])
+    }
+}
+
+impl<A> Extend<A> for DQT
 where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    A: Into<u16>,
+{
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = A>,
+    {
+        for (to, from) in self.0.iter_mut().zip(iter) {
+            *to = from.into();
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum DQTPrecision {
+    Bit8 = 0,
+    Bit16 = 1,
+}
+
+impl DQTPrecision {
+    fn new(b: u8) -> Option<Self> {
+        Some(match b {
+            0 => DQTPrecision::Bit8,
+            1 => DQTPrecision::Bit16,
+            _ => return None,
+        })
+    }
+}
+
+fn dqt<'a, I>() -> impl Parser<Output = DQT, Input = I> + 'a
+where
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+    any()
+        .and_then(|b| -> Result<_, StreamErrorFor<I>> {
+            Ok((
+                DQTPrecision::new(b & 0x0F).ok_or_else(|| {
+                    StreamErrorFor::<I>::message_static_message("Unexpected DQT precision")
+                })?,
+                b >> 4,
+            ))
+        })
+        .then_partial(|&mut (precision, identifier)| match precision {
+            DQTPrecision::Bit8 => count_min_max(64, 64, be_u16()).left(),
+            DQTPrecision::Bit16 => count_min_max(64, 64, any()).right(),
+        })
 }
 
 fn dri<'a, I>() -> impl Parser<Output = (), Input = I>
@@ -161,7 +212,7 @@ where
 
 fn do_segment<'a, I>(segment: Segment<'a>) -> Result<(), I::Error>
 where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]>,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     match segment.marker {

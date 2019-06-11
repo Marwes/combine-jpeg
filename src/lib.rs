@@ -467,6 +467,7 @@ impl Decoder {
                 Ok(())
             }
             Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
+            Marker::APP(_) => Ok(()),
             _ => panic!("Unhandled segment {:?}", segment.marker),
         }
     }
@@ -508,5 +509,14 @@ mod tests {
     fn it_works() {
         let _ = env_logger::try_init();
         assert_eq!(decode(include_bytes!("../img0.jpg"), &mut [0; 128]), Ok(()));
+    }
+
+    #[test]
+    fn green() {
+        let _ = env_logger::try_init();
+        assert_eq!(
+            decode(include_bytes!("../tests/images/green.jpg"), &mut [0; 128]),
+            Ok(())
+        );
     }
 }

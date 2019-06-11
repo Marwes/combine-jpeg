@@ -236,27 +236,38 @@ where
     )
 }
 
-struct HuffmanTable {
-    values: [u8; 16],
+macro_rules! fixed_slice {
+    ($expr: expr; $len: tt) => {{
+        unsafe fn transmute_array<T>(xs: &[T]) -> &[T; $len] {
+            assert!(xs.len() == $len);
+            &*(xs.as_ptr() as *const [T; $len])
+        }
+        unsafe { transmute_array($expr) }
+    }};
 }
 
-fn dht<'a, I>() -> impl Parser<Output = (), Input = I> + 'a
+struct DHT<'a> {
+    table_class: u8,
+    destination: u8,
+    code_lengths: &'a [u8; 16],
+    values: &'a [u8],
+}
+
+fn dht<'a, I>() -> impl Parser<Output = DHT<'a>, Input = I> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    (split_4_bit(), take(16))
-        .then_partial(
-            |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8])| {
-                parser(move |input: &mut I| {
-                    for &len in code_lengths {
-                        let (input_slice, _) = take(len.into()).parse_lazy(input).into_result()?;
-                    }
-                    Ok(((), Consumed::Consumed(())))
-                })
-            },
-        )
-        .with(value(()))
+    (split_4_bit(), take(16).map(|xs| fixed_slice!(xs; 16))).then_partial(
+        |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8; 16])| {
+            take(code_lengths.iter().map(|&x| usize::from(x)).sum()).map(move |values| DHT {
+                table_class,
+                destination,
+                code_lengths,
+                values,
+            })
+        },
+    )
 }
 
 static UNZIGZAG: [u8; 64] = [
@@ -436,7 +447,11 @@ impl Decoder {
                 self.frame = Some(sof2().parse(I::from(segment.data))?.0);
                 Ok(())
             }
-            Marker::DHT => dht().parse(I::from(segment.data)).map(|_| ()),
+            Marker::DHT => {
+                let dht = dht().parse(I::from(segment.data))?.0;
+                huffman::Table::new(dht.code_lengths, dht.values).unwrap(); // FIXME
+                Ok(())
+            }
             Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
             Marker::DRI => dri().parse(I::from(segment.data)).map(|_| ()),
             Marker::SOS => {
@@ -491,6 +506,7 @@ mod tests {
 
     #[test]
     fn it_works() {
+        let _ = env_logger::try_init();
         assert_eq!(decode(include_bytes!("../img0.jpg"), &mut [0; 128]), Ok(()));
     }
 }

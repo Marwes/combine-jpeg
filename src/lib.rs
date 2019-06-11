@@ -96,7 +96,7 @@ where
     any().map(|b| (b & 0x0F, b >> 4))
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Segment<'a> {
     marker: Marker,
     data: &'a [u8],
@@ -322,16 +322,17 @@ where
     any()
         .and_then(|b| -> Result<_, StreamErrorFor<I>> {
             Ok((
-                DQTPrecision::new(b & 0x0F).ok_or_else(|| {
+                DQTPrecision::new(b >> 4).ok_or_else(|| {
                     StreamErrorFor::<I>::message_static_message("Unexpected DQT precision")
                 })?,
-                b >> 4,
+                b & 0x0F,
             ))
         })
         .then_partial(|&mut (precision, identifier)| match precision {
-            DQTPrecision::Bit8 => count_min_max(64, 64, be_u16()).left(),
-            DQTPrecision::Bit16 => count_min_max(64, 64, any()).right(),
+            DQTPrecision::Bit8 => count_min_max(64, 64, any()).left(),
+            DQTPrecision::Bit16 => count_min_max(64, 64, be_u16()).right(),
         })
+        .message("DQT")
 }
 
 fn dri<'a, I>() -> impl Parser<Output = (), Input = I>
@@ -437,6 +438,7 @@ impl Decoder {
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
     {
+        log::trace!("Segment {:?}", segment);
         match segment.marker {
             Marker::SOI | Marker::RST(_) | Marker::EOI => Ok(()),
             Marker::SOF(0) => {

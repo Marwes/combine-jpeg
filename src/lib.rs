@@ -12,6 +12,8 @@ use combine::{
     Parser,
 };
 
+mod huffman;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Marker {
     SOI,

@@ -1,8 +1,17 @@
-use bitvec::prelude::*;
-
-enum TableClass {
+#[derive(Copy, Clone, Debug)]
+pub enum TableClass {
     AC = 0,
     DC = 1,
+}
+
+impl TableClass {
+    pub fn new(b: u8) -> Option<Self> {
+        Some(match b {
+            0 => TableClass::AC,
+            1 => TableClass::DC,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Default)]

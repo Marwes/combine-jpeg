@@ -1,12 +1,12 @@
 use combine::{
     easy,
-    error::{Consumed, ParseError, StreamError},
+    error::{ParseError, StreamError},
     parser,
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
         item::{any, eof, satisfy_map, value},
         range::{take, take_while1},
-        repeat::{count_min_max, many1, sep_by1},
+        repeat::{count_min_max, many1, sep_by1, skip_many1},
     },
     stream::{FullRangeStream, StreamErrorFor},
     Parser,
@@ -93,7 +93,7 @@ where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4))
+    any().map(|b| (b >> 4, b & 0x0F))
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -122,7 +122,7 @@ where
     })
 }
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 struct Dimensions {
     width: u16,
     height: u16,
@@ -171,6 +171,10 @@ struct ComponentSpecification {
     horizontal_sampling_factor: u8,
     vertical_sampling_factor: u8,
     quantization_table_destination_selector: u8,
+
+    // Computed parts
+    block_size: Dimensions,
+    size: Dimensions,
 }
 
 fn sof0<'a, I>() -> impl Parser<Output = Frame, Input = I>
@@ -198,6 +202,10 @@ where
                     horizontal_sampling_factor,
                     vertical_sampling_factor,
                     quantization_table_destination_selector,
+
+                    // Filled in later
+                    block_size: Default::default(),
+                    size: Default::default(),
                 },
             );
             count_min_max::<Frame, _>(
@@ -211,23 +219,44 @@ where
                 frame.samples_per_line = samples_per_line;
 
                 {
-                    let h_max = frame
-                        .components
-                        .iter()
-                        .map(|c| c.horizontal_sampling_factor)
-                        .max()
-                        .unwrap();
-                    let width = (f32::from(samples_per_line) / (f32::from(h_max) as f32 * 8.0))
-                        .ceil() as u16;
-                    let v_max = frame
-                        .components
-                        .iter()
-                        .map(|c| c.vertical_sampling_factor)
-                        .max()
-                        .unwrap();
-                    let height = (f32::from(lines) / (f32::from(v_max) as f32 * 8.0)).ceil() as u16;
+                    let h_max = f32::from(
+                        frame
+                            .components
+                            .iter()
+                            .map(|c| c.horizontal_sampling_factor)
+                            .max()
+                            .unwrap(),
+                    );
+                    let v_max = f32::from(
+                        frame
+                            .components
+                            .iter()
+                            .map(|c| c.vertical_sampling_factor)
+                            .max()
+                            .unwrap(),
+                    );
 
-                    frame.mcu_size = Dimensions { width, height };
+                    let samples_per_line = f32::from(samples_per_line);
+                    let lines = f32::from(lines);
+
+                    frame.mcu_size = Dimensions {
+                        width: (samples_per_line / (h_max * 8.0)).ceil() as u16,
+                        height: (lines / (v_max * 8.0)).ceil() as u16,
+                    };
+
+                    for component in &mut frame.components[..] {
+                        component.size.width = (f32::from(samples_per_line)
+                            * (f32::from(component.horizontal_sampling_factor) / h_max))
+                            .ceil() as u16;
+                        component.size.height = (lines
+                            * (f32::from(component.vertical_sampling_factor) / v_max))
+                            .ceil() as u16;
+
+                        component.block_size.width =
+                            frame.mcu_size.width * u16::from(component.horizontal_sampling_factor);
+                        component.block_size.height =
+                            frame.mcu_size.height * u16::from(component.vertical_sampling_factor);
+                    }
                 }
 
                 frame
@@ -247,27 +276,40 @@ macro_rules! fixed_slice {
 }
 
 struct DHT<'a> {
-    table_class: u8,
+    table_class: huffman::TableClass,
     destination: u8,
     code_lengths: &'a [u8; 16],
     values: &'a [u8],
 }
 
-fn dht<'a, I>() -> impl Parser<Output = DHT<'a>, Input = I> + 'a
+fn huffman_table<'a, I>() -> impl Parser<Output = DHT<'a>, Input = I> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    (split_4_bit(), take(16).map(|xs| fixed_slice!(xs; 16))).then_partial(
-        |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8; 16])| {
-            take(code_lengths.iter().map(|&x| usize::from(x)).sum()).map(move |values| DHT {
-                table_class,
-                destination,
-                code_lengths,
-                values,
-            })
-        },
+    (
+        split_4_bit().and_then(
+            |(table_class, destination)| -> Result<_, StreamErrorFor<I>> {
+                Ok((
+                    huffman::TableClass::new(table_class).ok_or_else(|| {
+                        StreamErrorFor::<I>::message_static_message("Invalid huffman table class")
+                    })?,
+                    destination,
+                ))
+            },
+        ),
+        take(16).map(|xs| fixed_slice!(xs; 16)),
     )
+        .then_partial(
+            |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8; 16])| {
+                take(code_lengths.iter().map(|&x| usize::from(x)).sum()).map(move |values| DHT {
+                    table_class,
+                    destination,
+                    code_lengths,
+                    values,
+                })
+            },
+        )
 }
 
 static UNZIGZAG: [u8; 64] = [
@@ -343,7 +385,8 @@ where
     any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
 }
 
-struct SOS {
+#[derive(Debug)]
+struct Scan {
     headers: Vec<ScanHeader>,
     start_of_selection: u8,
     end_of_selection: u8,
@@ -351,6 +394,7 @@ struct SOS {
     low_approximation: u8,
 }
 
+#[derive(Debug)]
 struct ScanHeader {
     component_index: u8,
     dc_table_selector: u8,
@@ -358,7 +402,7 @@ struct ScanHeader {
 }
 
 parser! {
-fn sos['a, 'f, I](frame: &'f Frame)(I) -> SOS
+fn sos['a, 'f, I](frame: &'f Frame)(I) -> Scan
 where [
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -402,7 +446,7 @@ where [
                 start_of_selection,
                 end_of_selection,
                 (high_approximation, low_approximation),
-            )| SOS {
+            )| Scan {
                 headers,
                 start_of_selection,
                 end_of_selection,
@@ -424,14 +468,101 @@ where
 #[derive(Default)]
 struct Decoder {
     frame: Option<Frame>,
-    sos: Option<SOS>,
+    scan: Option<Scan>,
+    ac_huffman_tables: [Option<huffman::Table>; 16],
+    dc_huffman_tables: [Option<huffman::Table>; 16],
 }
 
 impl Decoder {
-    fn decode(&self) {
+    fn decode(&self) -> Result<(), &'static str> {
         let frame = self.frame.as_ref().unwrap();
-        let sos = self.sos.as_ref().unwrap();
+        let scan = self.scan.as_ref().unwrap();
+
+        if scan.start_of_selection == 0
+            && scan.headers.iter().any(|header| {
+                self.dc_huffman_tables[usize::from(header.dc_table_selector)].is_none()
+            })
+        {
+            return Err("scan uses unset dc huffman table");
+        }
+
+        if scan.end_of_selection > 1
+            && scan.headers.iter().any(|header| {
+                self.ac_huffman_tables[usize::from(header.ac_table_selector)].is_none()
+            })
+        {
+            return Err("scan uses unset ac huffman table");
+        }
+
+        let mut mcu_row_coefficients: Vec<_> = frame
+            .components
+            .iter()
+            .map(|component| {
+                vec![
+                    0i16;
+                    usize::from(component.block_size.width)
+                        * usize::from(component.vertical_sampling_factor)
+                        * 64
+                ]
+            })
+            .collect();
+
+        for mcu_y in 0..usize::from(frame.mcu_size.height) {
+            for mcu_x in 0..usize::from(frame.mcu_size.width) {
+                for (i, component) in frame.components.iter().enumerate() {
+                    let blocks_per_mcu = usize::from(
+                        component.horizontal_sampling_factor * component.vertical_sampling_factor,
+                    );
+                    for j in 0..blocks_per_mcu {
+                        let (block_x, block_y);
+                        {
+                            let blocks_per_row = usize::from(component.block_size.width);
+                            let block_num = (mcu_y * usize::from(frame.mcu_size.width) + mcu_x)
+                                * blocks_per_mcu
+                                + j;
+
+                            block_x = (block_num % blocks_per_row) as u16;
+                            block_y = (block_num / blocks_per_row) as u16;
+
+                            if block_x * 8 >= component.size.width
+                                || block_y * 8 >= component.size.height
+                            {
+                                continue;
+                            }
+                        }
+
+                        let block_offset = (block_y as usize * component.block_size.width as usize
+                            + block_x as usize)
+                            * 64;
+                        let mcu_row_offset = mcu_y as usize
+                            * component.block_size.width as usize
+                            * component.vertical_sampling_factor as usize
+                            * 64;
+                        let coefficients = &mut mcu_row_coefficients[i]
+                            [block_offset - mcu_row_offset..block_offset - mcu_row_offset + 64];
+
+                        eprintln!(
+                            "{:?}",
+                            self.ac_huffman_tables
+                                .iter()
+                                .map(|t| t.is_some())
+                                .collect::<Vec<_>>()
+                        );
+
+                        eprintln!("{:?}", scan.headers[i]);
+                        let ac_table = self.ac_huffman_tables
+                            [usize::from(scan.headers[i].ac_table_selector)]
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("Missing AC table {}", i)); // TODO un-unwrap
+                        self.decode_block(coefficients, &ac_table)
+                    }
+                }
+            }
+        }
+        Ok(())
     }
+
+    fn decode_block(&self, coefficients: &mut [i16], ac_table: &huffman::Table) {}
 
     fn do_segment<'a, I>(&mut self, segment: Segment<'a>) -> Result<(), I::Error>
     where
@@ -450,8 +581,19 @@ impl Decoder {
                 Ok(())
             }
             Marker::DHT => {
-                let dht = dht().parse(I::from(segment.data))?.0;
-                huffman::Table::new(dht.code_lengths, dht.values).unwrap(); // FIXME
+                skip_many1(huffman_table().map(|dht| {
+                    let table = huffman::Table::new(dht.code_lengths, dht.values).unwrap(); // FIXME
+                    match dht.table_class {
+                        huffman::TableClass::AC => {
+                            self.ac_huffman_tables[usize::from(dht.destination)] = Some(table)
+                        }
+                        huffman::TableClass::DC => {
+                            self.dc_huffman_tables[usize::from(dht.destination)] = Some(table)
+                        }
+                    }
+                }))
+                .parse(I::from(segment.data))?
+                .0;
                 Ok(())
             }
             Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
@@ -464,8 +606,14 @@ impl Decoder {
                         StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
                     )
                 })?;
-                self.sos = Some(sos(frame).parse(input)?.0);
-                self.decode();
+                self.scan = Some(sos(frame).parse(input)?.0);
+                self.decode().map_err(|msg| {
+                    let input = I::from(segment.data);
+                    I::Error::from_error(
+                        input.position(),
+                        StreamErrorFor::<I>::message_static_message(msg),
+                    )
+                })?;
                 Ok(())
             }
             Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),

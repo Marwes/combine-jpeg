@@ -1,6 +1,6 @@
 use combine::{
     easy,
-    error::{ParseError, StreamError},
+    error::{Consumed, ParseError, StreamError},
     parser,
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
@@ -474,7 +474,7 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn decode(&self) -> Result<(), &'static str> {
+    fn decode(&self, input: &mut huffman::Biterator) -> Result<(), &'static str> {
         let frame = self.frame.as_ref().unwrap();
         let scan = self.scan.as_ref().unwrap();
 
@@ -506,6 +506,8 @@ impl Decoder {
                 ]
             })
             .collect();
+        let mut dc_predictors = [0i16; 4];
+        let mut eob_run = 0;
 
         for mcu_y in 0..usize::from(frame.mcu_size.height) {
             for mcu_x in 0..usize::from(frame.mcu_size.width) {
@@ -541,20 +543,28 @@ impl Decoder {
                         let coefficients = &mut mcu_row_coefficients[i]
                             [block_offset - mcu_row_offset..block_offset - mcu_row_offset + 64];
 
-                        eprintln!(
-                            "{:?}",
-                            self.ac_huffman_tables
-                                .iter()
-                                .map(|t| t.is_some())
-                                .collect::<Vec<_>>()
-                        );
-
-                        eprintln!("{:?}", scan.headers[i]);
+                        let dc_table = self.dc_huffman_tables
+                            [usize::from(scan.headers[i].dc_table_selector)]
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("Missing DC table {}", i)); // TODO un-unwrap
                         let ac_table = self.ac_huffman_tables
                             [usize::from(scan.headers[i].ac_table_selector)]
                         .as_ref()
                         .unwrap_or_else(|| panic!("Missing AC table {}", i)); // TODO un-unwrap
-                        self.decode_block(coefficients, &ac_table)
+
+                        if scan.high_approximation == 0 {
+                            self.decode_block(
+                                coefficients,
+                                scan,
+                                &dc_table,
+                                &ac_table,
+                                input,
+                                &mut eob_run,
+                                &mut dc_predictors[i],
+                            )?;
+                        } else {
+                            unimplemented!()
+                        }
                     }
                 }
             }
@@ -562,9 +572,99 @@ impl Decoder {
         Ok(())
     }
 
-    fn decode_block(&self, coefficients: &mut [i16], ac_table: &huffman::Table) {}
+    fn decode_block(
+        &self,
+        coefficients: &mut [i16],
+        scan: &Scan,
+        dc_table: &huffman::Table,
+        ac_table: &huffman::Table,
+        input: &mut huffman::Biterator,
+        eob_run: &mut u16,
+        dc_predictor: &mut i16,
+    ) -> Result<(), &'static str> {
+        if scan.start_of_selection == 0 {
+            let value = dc_table
+                .decode(input)
+                .ok_or_else(|| "Unable to huffman decode")?;
+            let diff = if value == 0 {
+                0
+            } else {
+                if value > 11 {
+                    return Err("Invalid DC difference magnitude category");
+                }
+                input
+                    .receive_extend(value)
+                    .ok_or_else(|| "Out of input in receive extend")?
+            };
 
-    fn do_segment<'a, I>(&mut self, segment: Segment<'a>) -> Result<(), I::Error>
+            // Malicious JPEG files can cause this add to overflow, therefore we use wrapping_add.
+            // One example of such a file is tests/crashtest/images/dc-predictor-overflow.jpg
+            *dc_predictor = dc_predictor.wrapping_add(diff);
+            coefficients[0] = *dc_predictor << scan.low_approximation;
+        }
+
+        let mut index = scan.start_of_selection.max(1);
+
+        if index < scan.end_of_selection && *eob_run > 0 {
+            *eob_run -= 1;
+            return Ok(());
+        }
+
+        // Section F.1.2.2.1
+        while index < scan.end_of_selection {
+            if let Some((value, run)) = ac_table
+                .decode_fast_ac(input)
+                .map_err(|()| "Unable to huffman decode")?
+            {
+                index += run;
+
+                if index >= scan.end_of_selection {
+                    break;
+                }
+
+                coefficients[usize::from(UNZIGZAG[usize::from(index)])] =
+                    value << scan.low_approximation;
+                index += 1;
+            } else {
+                let byte = ac_table
+                    .decode(input)
+                    .ok_or_else(|| "Unable to huffman decode")?;
+                let r = byte >> 4;
+                let s = byte & 0x0f;
+
+                if s == 0 {
+                    match r {
+                        15 => index += 16, // Run length of 16 zero coefficients.
+                        _ => {
+                            *eob_run = (1 << r) - 1;
+
+                            if r > 0 {
+                                *eob_run += input.next_bits(r).ok_or_else(|| "out of bits")?;
+                            }
+
+                            break;
+                        }
+                    }
+                } else {
+                    index += r;
+
+                    if index >= scan.end_of_selection {
+                        break;
+                    }
+
+                    coefficients[usize::from(UNZIGZAG[usize::from(index)])] = input
+                        .receive_extend(s)
+                        .ok_or_else(|| "Invalid receive_extend")?
+                        << scan.low_approximation;
+                    index += 1;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn do_segment<'a, I>(&mut self, segment: Segment<'a>, input: &mut I) -> Result<(), I::Error>
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -582,7 +682,8 @@ impl Decoder {
             }
             Marker::DHT => {
                 skip_many1(huffman_table().map(|dht| {
-                    let table = huffman::Table::new(dht.code_lengths, dht.values).unwrap(); // FIXME
+                    let table =
+                        huffman::Table::new(dht.code_lengths, dht.values, dht.table_class).unwrap(); // FIXME
                     match dht.table_class {
                         huffman::TableClass::AC => {
                             self.ac_huffman_tables[usize::from(dht.destination)] = Some(table)
@@ -599,21 +700,26 @@ impl Decoder {
             Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
             Marker::DRI => dri().parse(I::from(segment.data)).map(|_| ()),
             Marker::SOS => {
-                let input = I::from(segment.data);
+                let header_input = I::from(segment.data);
                 let frame = self.frame.as_ref().ok_or_else(|| {
                     I::Error::from_error(
                         input.position(),
                         StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
                     )
                 })?;
-                self.scan = Some(sos(frame).parse(input)?.0);
-                self.decode().map_err(|msg| {
+                let (scan, rest) = sos(frame).parse(header_input)?;
+                self.scan = Some(scan);
+
+                let mut biterator = huffman::Biterator::new(input.range());
+                self.decode(&mut biterator).map_err(|msg| {
                     let input = I::from(segment.data);
                     I::Error::from_error(
                         input.position(),
                         StreamErrorFor::<I>::message_static_message(msg),
                     )
                 })?;
+                *input = I::from(biterator.into_inner());
+
                 Ok(())
             }
             Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
@@ -626,15 +732,25 @@ impl Decoder {
 pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String, String, usize>> {
     let mut decoder = Decoder::default();
 
-    let mut parser = many1::<Vec<_>, _>(
-        segment().flat_map(|segment| decoder.do_segment::<easy::Stream<&[u8]>>(segment)),
-    )
-    .skip(eof());
-    parser.easy_parse(input).map_err(|err| {
-        err.map_position(|pos| pos.translate_position(input))
-            .map_token(|token| format!("0x{:X}", token))
-            .map_range(|range| format!("{:?}", range))
-    })?;
+    {
+        let decoder = std::cell::RefCell::new(&mut decoder);
+        let decoder = &decoder;
+        let mut parser = many1::<Vec<_>, _>(segment().then_partial(|&mut segment| {
+            parser(move |input| {
+                let x = decoder
+                    .borrow_mut()
+                    .do_segment::<easy::Stream<&[u8]>>(segment, input)
+                    .map_err(|err| Consumed::Consumed(err.into()))?;
+                Ok((x, Consumed::Consumed(())))
+            })
+        }))
+        .skip(eof());
+        parser.easy_parse(input).map_err(|err| {
+            err.map_position(|pos| pos.translate_position(input))
+                .map_token(|token| format!("0x{:X}", token))
+                .map_range(|range| format!("{:?}", range))
+        })?;
+    }
 
     let frame = decoder.frame.unwrap(); // FIXME
     let component = &frame.components[0];

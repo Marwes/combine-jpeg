@@ -1,56 +1,75 @@
 #[derive(Copy, Clone, Debug)]
 pub enum TableClass {
-    AC = 0,
-    DC = 1,
+    DC = 0,
+    AC = 1,
 }
 
 impl TableClass {
     pub fn new(b: u8) -> Option<Self> {
         Some(match b {
-            0 => TableClass::AC,
-            1 => TableClass::DC,
+            0 => TableClass::DC,
+            1 => TableClass::AC,
             _ => return None,
         })
     }
 }
 
-#[derive(Default)]
+const LUT_BITS: u8 = 8;
+
 pub(crate) struct Table {
     // TODO Use array?
     values: Vec<u8>,
     // TODO i32 seems redundant here
-    max_code: [i32; 18],
-    val_offset: [i32; 18],
+    max_code: [i32; 16],
+    val_offset: [i32; 16],
+    lut: [(u8, u8); 1 << LUT_BITS],
+    ac_lut: Option<[(i16, u8); 1 << LUT_BITS]>,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Table {
+            values: Default::default(),
+            max_code: Default::default(),
+            val_offset: Default::default(),
+            lut: [(0, 0); 1 << LUT_BITS],
+            ac_lut: Default::default(),
+        }
+    }
 }
 
 impl Table {
-    pub(crate) fn new(bits: &[u8; 16], values: &[u8]) -> Result<Table, &'static str> {
+    pub(crate) fn new(
+        bits: &[u8; 16],
+        values: &[u8],
+        class: TableClass,
+    ) -> Result<Table, &'static str> {
         log::trace!("Table::new({:?}, {:?})", bits, values);
         debug_assert!(values.len() <= 256);
 
         let (huffsize, num_symbols) = huffsize(bits)?;
         log::trace!("huffsize: {:?}", &huffsize[..num_symbols]);
 
-        let mut huffcode = [0u8; 256]; // Size?
-        let mut k = 0;
-        let mut code = 0;
-        let mut si = huffsize[0];
+        let mut huffcode = [0u16; 256]; // Size?
+        let mut code = 0u32;
+        let mut code_size = huffsize[0];
 
-        loop {
-            while huffsize[k] == si {
-                huffcode[k] = code;
-                code += 1;
-                k += 1;
+        for (&size, huffcode_elem) in huffsize[..num_symbols]
+            .iter()
+            .zip(&mut huffcode[..num_symbols])
+        {
+            while code_size < size {
+                code <<= 1;
+                code_size += 1;
             }
-            if huffsize[k] == 0 {
-                break;
-            }
-            if u64::from(code) >= 1 << u64::from(si) {
-                log::trace!("bad huffman code length: {} {}", code, si);
+
+            if u64::from(code) >= 1 << u64::from(code_size) {
+                log::trace!("bad huffman code length: {} {}", code, code_size);
                 return Err("bad huffman code length"); // ?
             }
-            code <<= 1;
-            si += 1;
+
+            *huffcode_elem = code as u16;
+            code += 1;
         }
 
         let mut table = Table::default();
@@ -66,10 +85,97 @@ impl Table {
                 table.max_code[l] = -1; // No code of this length
             }
         }
-        table.max_code[16] = 0;
-        table.val_offset[16] = 0xFFFFF;
+
+        // Build a lookup table for faster decoding.
+        table.lut = [(0u8, 0u8); 1 << LUT_BITS];
+
+        for (i, &size) in huffsize[..num_symbols]
+            .iter()
+            .enumerate()
+            .filter(|&(_, &size)| size <= LUT_BITS)
+        {
+            let bits_remaining = LUT_BITS - size;
+            let start = (huffcode[i] << bits_remaining) as usize;
+
+            for j in 0..1 << bits_remaining {
+                table.lut[start + j] = (values[i], size);
+            }
+        }
+
+        table.ac_lut = match class {
+            TableClass::DC => None,
+            TableClass::AC => {
+                let mut ac_lut = [(0i16, 0u8); 1 << LUT_BITS];
+
+                for (i, &(value, size)) in table.lut.iter().enumerate() {
+                    let run_length = value >> 4;
+                    let magnitude_category = value & 0x0f;
+
+                    if magnitude_category > 0 && size + magnitude_category <= LUT_BITS {
+                        let unextended_ac_value = (((i << size) & ((1 << LUT_BITS) - 1))
+                            >> (LUT_BITS - magnitude_category))
+                            as u16;
+                        let ac_value = extend(unextended_ac_value, magnitude_category);
+
+                        ac_lut[i] = (ac_value, (run_length << 4) | (size + magnitude_category));
+                    }
+                }
+
+                Some(ac_lut)
+            }
+        };
 
         Ok(table)
+    }
+
+    pub(crate) fn decode(&self, input: &mut Biterator) -> Option<u8> {
+        if input.count < LUT_BITS {
+            if let None = input.fill_bits() {
+                return None;
+            }
+        }
+        let (value, size) = self.lut[usize::from(input.peek_bits(LUT_BITS))];
+
+        if size > 0 {
+            input.consume_bits(size);
+            Some(value)
+        } else {
+            let mut code = 0i32;
+            let mut offset = 0;
+            for (i, &max_code) in self.max_code.iter().enumerate() {
+                if code <= max_code {
+                    offset = i;
+                    break;
+                }
+                code <<= 1;
+                code |= i32::from(input.next_bit()?);
+            }
+            Some(self.values[(code + self.val_offset[offset]) as usize])
+        }
+    }
+
+    pub(crate) fn decode_fast_ac(&self, input: &mut Biterator) -> Result<Option<(i16, u8)>, ()> {
+        if let Some(ac_lut) = &self.ac_lut {
+            eprintln!("---");
+            if input.count < LUT_BITS {
+                eprintln!("FILL");
+                if let None = input.fill_bits() {
+                    return Err(());
+                }
+            }
+
+            let (value, run_size) = ac_lut[input.peek_bits(LUT_BITS) as usize];
+
+            if run_size != 0 {
+                let run = run_size >> 4;
+                let size = run_size & 0x0f;
+
+                input.consume_bits(size);
+                return Ok(Some((value, run)));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -89,30 +195,88 @@ fn huffsize(bits: &[u8; 16]) -> Result<([u8; 256], usize), &'static str> {
     Ok((huffsize, p))
 }
 
-struct Decoder;
-
-impl Decoder {
-    fn decode(&self, table: &Table, mut input: impl Iterator<Item = bool>) -> Option<u8> {
-        let mut code = 0i32;
-        let mut offset = 0;
-        for (i, &max_code) in table.max_code.iter().enumerate() {
-            if code <= max_code {
-                offset = i;
-                break;
-            }
-            code <<= 1;
-            code |= i32::from(input.next()?);
-        }
-        Some(table.values[(code + table.val_offset[offset]) as usize])
-    }
-}
-
 fn extend(v: u16, t: u8) -> i16 {
     let vt = 1 << (u16::from(t) - 1);
     if v < vt {
         v as i16 + (-1 << i16::from(t)) + 1
     } else {
         v as i16
+    }
+}
+
+#[derive(Debug)]
+pub struct Biterator<'a> {
+    input: &'a [u8],
+    bits: u64,
+    count: u8,
+}
+
+impl<'a> Biterator<'a> {
+    pub fn new(input: &'a [u8]) -> Self {
+        Biterator {
+            input,
+            bits: 0,
+            count: 0,
+        }
+    }
+
+    pub(crate) fn into_inner(self) -> &'a [u8] {
+        self.input
+    }
+
+    pub(crate) fn receive_extend(&mut self, count: u8) -> Option<i16> {
+        let value = self.next_bits(count)?;
+        Some(extend(value, count))
+    }
+
+    fn next_bit(&mut self) -> Option<bool> {
+        self.next_bits(1).map(|b| b != 0)
+    }
+
+    pub fn next_bits(&mut self, count: u8) -> Option<u16> {
+        if self.count < count {
+            self.fill_bits()?;
+        }
+        if self.count < count {
+            return None;
+        }
+        let bits = self.peek_bits(count);
+        self.consume_bits(count);
+        Some(bits)
+    }
+
+    fn consume_bits(&mut self, count: u8) {
+        debug_assert!(self.count >= count);
+        self.bits <<= count;
+        self.count -= count;
+    }
+
+    fn peek_bits(&self, count: u8) -> u16 {
+        debug_assert!(self.count >= count);
+
+        ((self.bits >> (64 - count)) & ((1 << count) - 1)) as u16
+    }
+
+    fn fill_bits(&mut self) -> Option<()> {
+        while self.count < 64 {
+            if self.input.is_empty() {
+                return None;
+            }
+            let b = match self.input[0] {
+                0xFF if self.input.get(1) == Some(&0x00) => {
+                    self.input = &self.input[2..];
+                    0xFF
+                }
+                0xFF => return Some(()), // Not a stuffed 0xFF so we found a marker.
+                b => {
+                    self.input = &self.input[1..];
+                    b
+                }
+            };
+            self.bits |= u64::from(b) << 56 - self.count;
+            self.count += 8;
+        }
+        Some(())
     }
 }
 
@@ -193,7 +357,7 @@ mod tests {
     };
 
     fn run_test(test_table: &TestTable) {
-        Table::new(&test_table.bits, &test_table.values).unwrap();
+        Table::new(&test_table.bits, &test_table.values, test_table.table_class).unwrap();
     }
 
     #[test]

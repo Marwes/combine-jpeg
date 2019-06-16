@@ -130,7 +130,8 @@ impl Table {
 
     pub(crate) fn decode(&self, input: &mut Biterator) -> Option<u8> {
         if input.count < LUT_BITS {
-            if let None = input.fill_bits() {
+            input.fill_bits();
+            if input.count < LUT_BITS {
                 return None;
             }
         }
@@ -159,8 +160,9 @@ impl Table {
             eprintln!("---");
             if input.count < LUT_BITS {
                 eprintln!("FILL");
-                if let None = input.fill_bits() {
-                    return Err(());
+                input.fill_bits();
+                if input.count < LUT_BITS {
+                    return Ok(None);
                 }
             }
 
@@ -267,7 +269,10 @@ impl<'a> Biterator<'a> {
                     self.input = &self.input[2..];
                     0xFF
                 }
-                0xFF => return Some(()), // Not a stuffed 0xFF so we found a marker.
+                0xFF => {
+                    self.count = 64;
+                    return Some(()); // Not a stuffed 0xFF so we found a marker.
+                }
                 b => {
                     self.input = &self.input[1..];
                     b

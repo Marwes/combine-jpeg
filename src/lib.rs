@@ -1,3 +1,9 @@
+use std::mem;
+
+use arrayvec::ArrayVec;
+
+use derive_more::{Display, From};
+
 use combine::{
     easy,
     error::{Consumed, ParseError, StreamError},
@@ -5,14 +11,36 @@ use combine::{
     parser::{
         byte::{byte, num::be_u16, take_until_byte},
         item::{any, eof, satisfy_map, value},
-        range::{take, take_while1},
+        range::{range, take, take_while1},
         repeat::{count_min_max, many1, sep_by1, skip_many1},
     },
     stream::{FullRangeStream, StreamErrorFor},
     Parser,
 };
 
+mod color_conversion;
 mod huffman;
+mod idct;
+mod upsampler;
+
+#[derive(Debug, PartialEq, Eq, Display)]
+pub enum UnsupportedFeature {
+    NonIntegerSubsamplingRatio,
+}
+
+#[derive(Debug, PartialEq, Display, From)]
+pub enum Error {
+    #[display(fmt = "{}", _0)]
+    Unsupported(UnsupportedFeature),
+
+    #[display(fmt = "{}", _0)]
+    Parse(easy::Errors<String, String, usize>),
+
+    #[display(fmt = "{}", _0)]
+    Message(&'static str),
+}
+
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Marker {
@@ -128,45 +156,43 @@ struct Dimensions {
     height: u16,
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum CodingProcess {
+    Baseline,
+    Sequential,
+    Progressive,
+    LossLess,
+}
+
+type Components = ArrayVec<[Component; 256]>;
+
 struct Frame {
+    marker_index: u8,
     precision: u8,
     lines: u16,
     samples_per_line: u16,
     mcu_size: Dimensions,
-    components: [ComponentSpecification; 256],
-}
-
-impl Default for Frame {
-    fn default() -> Self {
-        Self {
-            precision: 0,
-            lines: 0,
-            samples_per_line: 0,
-            mcu_size: Default::default(),
-            components: [ComponentSpecification::default(); 256],
-        }
-    }
-}
-
-impl Extend<ComponentSpecification> for Frame {
-    fn extend<T>(&mut self, iter: T)
-    where
-        T: IntoIterator<Item = ComponentSpecification>,
-    {
-        for (to, from) in self.components.iter_mut().zip(iter) {
-            *to = from;
-        }
-    }
+    components: Components,
 }
 
 impl Frame {
+    fn coding_process(&self) -> CodingProcess {
+        match self.marker_index {
+            0 => CodingProcess::Baseline,
+            1 | 5 | 9 | 13 => CodingProcess::Sequential,
+            2 | 6 | 10 | 14 => CodingProcess::Progressive,
+            3 | 7 | 11 | 15 => CodingProcess::LossLess,
+            i => panic!("Unknown SOF marker {}", i),
+        }
+    }
+
     fn component_width(&self, index: usize) -> u16 {
         self.mcu_size.width * u16::from(self.components[index].horizontal_sampling_factor)
     }
 }
 
 #[derive(Copy, Clone, Default)]
-struct ComponentSpecification {
+struct Component {
     component_identifier: u8,
     horizontal_sampling_factor: u8,
     vertical_sampling_factor: u8,
@@ -177,27 +203,19 @@ struct ComponentSpecification {
     size: Dimensions,
 }
 
-fn sof0<'a, I>() -> impl Parser<Output = Frame, Input = I>
-where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-{
-    sof2()
-}
-
-fn sof2<'a, I>() -> impl Parser<Output = Frame, Input = I>
+fn sof<'a, I>(marker_index: u8) -> impl Parser<Output = Frame, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     (any(), be_u16(), be_u16(), any()).then_partial(
-        |&mut (precision, lines, samples_per_line, components_in_frame)| {
+        move |&mut (precision, lines, samples_per_line, components_in_frame)| {
             let component = (any(), split_4_bit(), any()).map(
                 |(
                     component_identifier,
                     (horizontal_sampling_factor, vertical_sampling_factor),
                     quantization_table_destination_selector,
-                )| ComponentSpecification {
+                )| Component {
                     component_identifier,
                     horizontal_sampling_factor,
                     vertical_sampling_factor,
@@ -208,28 +226,23 @@ where
                     size: Default::default(),
                 },
             );
-            count_min_max::<Frame, _>(
+            count_min_max(
                 usize::from(components_in_frame),
                 usize::from(components_in_frame),
                 component,
             )
-            .map(move |mut frame| {
-                frame.precision = precision;
-                frame.lines = lines;
-                frame.samples_per_line = samples_per_line;
-
+            .map(move |mut components: Components| {
+                let mcu_size;
                 {
                     let h_max = f32::from(
-                        frame
-                            .components
+                        components
                             .iter()
                             .map(|c| c.horizontal_sampling_factor)
                             .max()
                             .unwrap(),
                     );
                     let v_max = f32::from(
-                        frame
-                            .components
+                        components
                             .iter()
                             .map(|c| c.vertical_sampling_factor)
                             .max()
@@ -239,12 +252,12 @@ where
                     let samples_per_line = f32::from(samples_per_line);
                     let lines = f32::from(lines);
 
-                    frame.mcu_size = Dimensions {
+                    mcu_size = Dimensions {
                         width: (samples_per_line / (h_max * 8.0)).ceil() as u16,
                         height: (lines / (v_max * 8.0)).ceil() as u16,
                     };
 
-                    for component in &mut frame.components[..] {
+                    for component in &mut components[..] {
                         component.size.width = (f32::from(samples_per_line)
                             * (f32::from(component.horizontal_sampling_factor) / h_max))
                             .ceil() as u16;
@@ -253,13 +266,20 @@ where
                             .ceil() as u16;
 
                         component.block_size.width =
-                            frame.mcu_size.width * u16::from(component.horizontal_sampling_factor);
+                            mcu_size.width * u16::from(component.horizontal_sampling_factor);
                         component.block_size.height =
-                            frame.mcu_size.height * u16::from(component.vertical_sampling_factor);
+                            mcu_size.height * u16::from(component.vertical_sampling_factor);
                     }
                 }
 
-                frame
+                Frame {
+                    marker_index,
+                    precision,
+                    lines,
+                    samples_per_line,
+                    mcu_size,
+                    components,
+                }
             })
         },
     )
@@ -318,11 +338,31 @@ static UNZIGZAG: [u8; 64] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-struct DQT([u16; 64]);
+struct QuantizationTable([u16; 64]);
+
+impl QuantizationTable {
+    fn new(dqt: &DQT) -> Self {
+        let mut quantization_table = [0u16; 64];
+
+        for j in 0..64 {
+            quantization_table[usize::from(UNZIGZAG[j])] = dqt.table[j];
+        }
+
+        Self(quantization_table)
+    }
+}
+
+struct DQT {
+    identifier: u8,
+    table: [u16; 64],
+}
 
 impl Default for DQT {
     fn default() -> Self {
-        DQT([0; 64])
+        DQT {
+            identifier: u8::max_value(),
+            table: [0; 64],
+        }
     }
 }
 
@@ -335,7 +375,7 @@ where
         T: IntoIterator<Item = A>,
     {
         for (i, from) in (0..64).zip(iter) {
-            self.0[usize::from(UNZIGZAG[i])] = from.into();
+            self.table[usize::from(UNZIGZAG[i])] = from.into();
         }
     }
 }
@@ -361,18 +401,28 @@ where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any()
-        .and_then(|b| -> Result<_, StreamErrorFor<I>> {
+    split_4_bit()
+        .and_then(|(precision, identifier)| -> Result<_, StreamErrorFor<I>> {
             Ok((
-                DQTPrecision::new(b >> 4).ok_or_else(|| {
+                DQTPrecision::new(precision).ok_or_else(|| {
                     StreamErrorFor::<I>::message_static_message("Unexpected DQT precision")
                 })?,
-                b & 0x0F,
+                identifier,
             ))
         })
         .then_partial(|&mut (precision, identifier)| match precision {
-            DQTPrecision::Bit8 => count_min_max(64, 64, any()).left(),
-            DQTPrecision::Bit16 => count_min_max(64, 64, be_u16()).right(),
+            DQTPrecision::Bit8 => count_min_max(64, 64, any())
+                .map(move |mut dqt: DQT| {
+                    dqt.identifier = identifier;
+                    dqt
+                })
+                .left(),
+            DQTPrecision::Bit16 => count_min_max(64, 64, be_u16())
+                .map(move |mut dqt: DQT| {
+                    dqt.identifier = identifier;
+                    dqt
+                })
+                .right(),
         })
         .message("DQT")
 }
@@ -409,6 +459,7 @@ where [
 ]
 {
     let frame = *frame;
+    let mut max_index: Option<u8> = None;
     (
         any().then_partial(move |&mut image_components| {
             let image_components = usize::from(image_components);
@@ -427,6 +478,23 @@ where [
                                     "Component does not exist in frame",
                                 )
                             })? as u8;
+
+                        if let Some(max_index) = max_index {
+                            use std::cmp::Ordering;
+                            match component_index.cmp(&max_index) {
+                                Ordering::Less =>
+                                    return Err(StreamErrorFor::<I>::message_static_message(
+                                        "Component index is smaller than the previous indicies"
+                                    )),
+                                Ordering::Equal =>
+                                    return Err(StreamErrorFor::<I>::message_static_message(
+                                        "Component index is is not unique"
+                                    )),
+                                Ordering::Greater => (),
+                            }
+                        }
+                        max_index = Some(component_index);
+
                         Ok(ScanHeader {
                             component_index,
                             dc_table_selector,
@@ -457,12 +525,29 @@ where [
 }
 }
 
-fn app_adobe<'a, I>() -> impl Parser<Output = (), Input = I>
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum AdobeColorTransform {
+    Unknown = 0,
+    YCbCr = 1,
+    YCCK = 2,
+}
+
+fn app_adobe<'a, I>() -> impl Parser<Output = AdobeColorTransform, Input = I>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    any().map(|b| (b & 0x0F, b >> 4)).with(value(()))
+    range(&b"Adobe\0"[..]).skip(take(5)).with(
+        satisfy_map(|b| {
+            Some(match b {
+                0 => AdobeColorTransform::Unknown,
+                1 => AdobeColorTransform::YCbCr,
+                2 => AdobeColorTransform::YCCK,
+                _ => return None,
+            })
+        })
+        .expected("Adobe color transform"),
+    )
 }
 
 #[derive(Default)]
@@ -471,10 +556,16 @@ struct Decoder {
     scan: Option<Scan>,
     ac_huffman_tables: [Option<huffman::Table>; 16],
     dc_huffman_tables: [Option<huffman::Table>; 16],
+    quantization_tables: [Option<QuantizationTable>; 4],
+    planes: Vec<Vec<u8>>,
+    color_transform: Option<AdobeColorTransform>,
 }
 
 impl Decoder {
-    fn decode(&self, input: &mut huffman::Biterator) -> Result<(), &'static str> {
+    fn decode<'a>(
+        &'a self,
+        input: &mut huffman::Biterator,
+    ) -> Result<impl Iterator<Item = Vec<u8>> + 'a, &'static str> {
         let frame = self.frame.as_ref().unwrap();
         let scan = self.scan.as_ref().unwrap();
 
@@ -508,20 +599,38 @@ impl Decoder {
             .collect();
         let mut dc_predictors = [0i16; 4];
         let mut eob_run = 0;
+        let is_interleaved = frame.components.len() > 1;
 
-        for mcu_y in 0..usize::from(frame.mcu_size.height) {
-            for mcu_x in 0..usize::from(frame.mcu_size.width) {
+        let mut results: [Vec<_>; 4] = Default::default();
+        for (component, result) in frame.components.iter().zip(&mut results[..]) {
+            result.resize(
+                usize::from(component.block_size.width)
+                    * usize::from(component.block_size.height)
+                    * 64,
+                0u8,
+            );
+        }
+
+        let mut offsets = [0; 256];
+
+        for mcu_y in 0..frame.mcu_size.height {
+            for mcu_x in 0..frame.mcu_size.width {
                 for (i, component) in frame.components.iter().enumerate() {
-                    let blocks_per_mcu = usize::from(
-                        component.horizontal_sampling_factor * component.vertical_sampling_factor,
-                    );
-                    for j in 0..blocks_per_mcu {
+                    let blocks_per_mcu = u16::from(component.horizontal_sampling_factor)
+                        * u16::from(component.vertical_sampling_factor);
+                    for j in 0..u16::from(blocks_per_mcu) {
                         let (block_x, block_y);
-                        {
+
+                        if is_interleaved {
+                            block_x = mcu_x * u16::from(component.horizontal_sampling_factor)
+                                + j % u16::from(component.horizontal_sampling_factor);
+                            block_y = mcu_y * u16::from(component.vertical_sampling_factor)
+                                + j / u16::from(component.horizontal_sampling_factor);
+                        } else {
                             let blocks_per_row = usize::from(component.block_size.width);
-                            let block_num = (mcu_y * usize::from(frame.mcu_size.width) + mcu_x)
-                                * blocks_per_mcu
-                                + j;
+                            let block_num = usize::from(
+                                (mcu_y * frame.mcu_size.width + mcu_x * blocks_per_mcu) + j,
+                            );
 
                             block_x = (block_num % blocks_per_row) as u16;
                             block_y = (block_num / blocks_per_row) as u16;
@@ -543,6 +652,7 @@ impl Decoder {
                         let coefficients = &mut mcu_row_coefficients[i]
                             [block_offset - mcu_row_offset..block_offset - mcu_row_offset + 64];
 
+                        eprintln!("{:?}", scan.headers[i]);
                         let dc_table = self.dc_huffman_tables
                             [usize::from(scan.headers[i].dc_table_selector)]
                         .as_ref()
@@ -567,9 +677,59 @@ impl Decoder {
                         }
                     }
                 }
+
+                for (component_index, component) in frame.components.iter().enumerate() {
+                    let coefficients_per_mcu_row = component.block_size.width as usize
+                        * component.vertical_sampling_factor as usize
+                        * 64;
+
+                    let row_coefficients = if frame.coding_process() == CodingProcess::Progressive {
+                        unimplemented!()
+                    } else {
+                        &mut mcu_row_coefficients[component_index]
+                    };
+
+                    // Convert coefficients from a MCU row to samples.
+                    let data = row_coefficients;
+                    let offset = offsets[component_index];
+
+                    let quantization_table = self.quantization_tables
+                        [usize::from(component.quantization_table_destination_selector)]
+                    .as_ref()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing quantization table {}",
+                            component.quantization_table_destination_selector
+                        )
+                    });
+
+                    let block_count = usize::from(component.block_size.width)
+                        * usize::from(component.vertical_sampling_factor);
+                    let line_stride = usize::from(component.block_size.width) * 8;
+
+                    assert_eq!(data.len(), block_count * 64);
+
+                    for i in 0..block_count {
+                        let x = (i % usize::from(component.block_size.width)) * 8;
+                        let y = (i / usize::from(component.block_size.width)) * 8;
+                        idct::dequantize_and_idct_block(
+                            &data[i * 64..(i + 1) * 64],
+                            &quantization_table.0,
+                            line_stride,
+                            &mut results[component_index][offset + y * line_stride + x..],
+                        );
+                    }
+
+                    offsets[component_index] += data.len();
+                }
             }
         }
-        Ok(())
+        Ok(scan.headers.iter().map(move |header| {
+            mem::replace(
+                &mut results[usize::from(header.component_index)],
+                Default::default(),
+            )
+        }))
     }
 
     fn decode_block(
@@ -672,12 +832,8 @@ impl Decoder {
         log::trace!("Segment {:?}", segment);
         match segment.marker {
             Marker::SOI | Marker::RST(_) | Marker::EOI => Ok(()),
-            Marker::SOF(0) => {
-                self.frame = Some(sof0().parse(I::from(segment.data))?.0);
-                Ok(())
-            }
-            Marker::SOF(2) => {
-                self.frame = Some(sof2().parse(I::from(segment.data))?.0);
+            Marker::SOF(i) => {
+                self.frame = Some(sof(i).parse(I::from(segment.data))?.0);
                 Ok(())
             }
             Marker::DHT => {
@@ -697,7 +853,14 @@ impl Decoder {
                 .0;
                 Ok(())
             }
-            Marker::DQT => dqt().parse(I::from(segment.data)).map(|_| ()),
+            Marker::DQT => {
+                skip_many1(dqt().map(|dqt| {
+                    self.quantization_tables[usize::from(dqt.identifier)] =
+                        Some(QuantizationTable::new(&dqt));
+                }))
+                .parse(I::from(segment.data))?;
+                Ok(())
+            }
             Marker::DRI => dri().parse(I::from(segment.data)).map(|_| ()),
             Marker::SOS => {
                 let header_input = I::from(segment.data);
@@ -707,29 +870,36 @@ impl Decoder {
                         StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
                     )
                 })?;
-                let (scan, rest) = sos(frame).parse(header_input)?;
+                let (scan, _rest) = sos(frame).parse(header_input)?;
                 self.scan = Some(scan);
 
                 let mut biterator = huffman::Biterator::new(input.range());
-                self.decode(&mut biterator).map_err(|msg| {
-                    let input = I::from(segment.data);
-                    I::Error::from_error(
-                        input.position(),
-                        StreamErrorFor::<I>::message_static_message(msg),
-                    )
-                })?;
+                let planes = self
+                    .decode(&mut biterator)
+                    .map_err(|msg| {
+                        let input = I::from(segment.data);
+                        I::Error::from_error(
+                            input.position(),
+                            StreamErrorFor::<I>::message_static_message(msg),
+                        )
+                    })?
+                    .collect();
+                self.planes = planes;
                 *input = I::from(biterator.into_inner());
 
                 Ok(())
             }
-            Marker::APP_ADOBE => app_adobe().parse(I::from(segment.data)).map(|_| ()),
+            Marker::APP_ADOBE => {
+                self.color_transform = Some(app_adobe().parse(I::from(segment.data))?.0);
+                Ok(())
+            }
             Marker::APP(_) => Ok(()),
             _ => panic!("Unhandled segment {:?}", segment.marker),
         }
     }
 }
 
-pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String, String, usize>> {
+pub fn decode(input: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = Decoder::default();
 
     {
@@ -752,6 +922,8 @@ pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String
         })?;
     }
 
+    let is_jfif = false; // TODO
+
     let frame = decoder.frame.unwrap(); // FIXME
     let component = &frame.components[0];
 
@@ -759,12 +931,23 @@ pub fn decode(input: &[u8], output: &mut [u8]) -> Result<(), easy::Errors<String
     let height = usize::from(frame.lines);
     let width = usize::from(frame.samples_per_line);
 
-    for y in 0..height {
-        for x in 0..width {
-            // output[y * width + height] = data[y * line_stride + x];
-        }
+    let data = &decoder.planes;
+
+    let color_convert_func = color_conversion::choose_color_convert_func(
+        frame.components.len(),
+        is_jfif,
+        decoder.color_transform,
+    )?;
+    let upsampler =
+        upsampler::Upsampler::new(&frame.components, frame.samples_per_line, frame.lines)?;
+    let line_size = width * frame.components.len();
+    let mut image = vec![0u8; line_size * height];
+
+    for (row, line) in image.chunks_mut(line_size).enumerate() {
+        upsampler.upsample_and_interleave_row(data, row, width, line);
+        color_convert_func(line, width);
     }
-    Ok(())
+    Ok(image)
 }
 
 #[cfg(test)]
@@ -774,15 +957,37 @@ mod tests {
     #[test]
     fn it_works() {
         let _ = env_logger::try_init();
-        assert_eq!(decode(include_bytes!("../img0.jpg"), &mut [0; 128]), Ok(()));
+        assert_eq!(decode(include_bytes!("../img0.jpg")), Ok(vec![]));
     }
 
     #[test]
     fn green() {
         let _ = env_logger::try_init();
         assert_eq!(
-            decode(include_bytes!("../tests/images/green.jpg"), &mut [0; 128]),
-            Ok(())
+            decode(include_bytes!("../tests/images/green.jpg")),
+            Ok(vec![
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77,
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77,
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77,
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77,
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77,
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77,
+                35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35,
+                177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177, 77, 35, 177,
+                77, 35, 177, 77
+            ])
         );
     }
 }

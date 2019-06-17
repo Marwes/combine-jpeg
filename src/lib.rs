@@ -59,7 +59,7 @@ enum Marker {
     SOS,
     RST(u8),
     APP(u8),
-    COM(u8),
+    COM,
     EOI,
 }
 
@@ -109,6 +109,7 @@ where
                 0xD0...0xD7 => Marker::RST(b - 0xD0),
                 0xE0...0xEF => Marker::APP(b - 0xE0),
                 0xD9 => Marker::EOI,
+                0xFE => Marker::COM,
                 _ => return None,
             })
         })
@@ -141,11 +142,10 @@ where
             Parser::left(value(Segment { marker, data: &[] }).left())
         }
         Marker::DRI => Parser::left(take(4).map(move |data| Segment { marker, data }).right()),
-        Marker::SOF(_) | Marker::DHT | Marker::DQT | Marker::SOS | Marker::APP(_) => be_u16() // TODO Check length >= 2
+        Marker::SOF(_) | Marker::DHT | Marker::DQT | Marker::SOS | Marker::APP(_) | Marker::COM => be_u16() // TODO Check length >= 2
             .then(|quantization_table_len| take((quantization_table_len - 2).into()))
             .map(move |data| Segment { marker, data })
             .right(),
-        _ => panic!("Unhandled marker {:?}", marker),
     }
     })
 }
@@ -942,7 +942,7 @@ impl Decoder {
                 Ok(())
             }
             Marker::APP(_) => Ok(()),
-            _ => panic!("Unhandled segment {:?}", segment.marker),
+            Marker::COM => Ok(()),
         }
     }
 }

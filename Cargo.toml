@@ -15,4 +15,6 @@ derive_more = "0.15"
 
 [dev-dependencies]
 env_logger = "*"
+dssim = "2"
+image = "0.21"
 huffman-compress = "0.6"

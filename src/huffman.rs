@@ -1,3 +1,7 @@
+use std::iter;
+
+use arrayvec::ArrayVec;
+
 #[derive(Copy, Clone, Debug)]
 pub enum TableClass {
     DC = 0,
@@ -47,17 +51,14 @@ impl Table {
         log::trace!("Table::new({:?}, {:?})", bits, values);
         debug_assert!(values.len() <= 256);
 
-        let (huffsize, num_symbols) = huffsize(bits)?;
-        log::trace!("huffsize: {:?}", &huffsize[..num_symbols]);
+        let huffsize = huffsize(bits)?;
+        log::trace!("huffsize: {:?}", huffsize);
 
         let mut huffcode = [0u16; 256]; // Size?
         let mut code = 0u32;
         let mut code_size = huffsize[0];
 
-        for (&size, huffcode_elem) in huffsize[..num_symbols]
-            .iter()
-            .zip(&mut huffcode[..num_symbols])
-        {
+        for (&size, huffcode_elem) in huffsize.iter().zip(&mut huffcode[..huffsize.len()]) {
             while code_size < size {
                 code <<= 1;
                 code_size += 1;
@@ -89,7 +90,7 @@ impl Table {
         // Build a lookup table for faster decoding.
         table.lut = [(0u8, 0u8); 1 << LUT_BITS];
 
-        for (i, &size) in huffsize[..num_symbols]
+        for (i, &size) in huffsize
             .iter()
             .enumerate()
             .filter(|&(_, &size)| size <= LUT_BITS)
@@ -129,7 +130,7 @@ impl Table {
     }
 
     pub(crate) fn decode(&self, input: &mut Biterator) -> Option<u8> {
-        if input.count < LUT_BITS {
+        if input.count < 16 {
             input.fill_bits();
             if input.count < LUT_BITS {
                 return None;
@@ -141,25 +142,25 @@ impl Table {
             input.consume_bits(size);
             Some(value)
         } else {
-            let mut code = 0i32;
-            let mut offset = 0;
-            for (i, &max_code) in self.max_code.iter().enumerate() {
-                if code <= max_code {
-                    offset = i;
-                    break;
+            let bits = input.peek_bits(16);
+
+            for i in LUT_BITS..16 {
+                let code = i32::from(bits >> (15 - i));
+
+                if code <= self.max_code[usize::from(i)] {
+                    input.consume_bits(i + 1);
+
+                    let index = (code + self.val_offset[usize::from(i)]) as usize;
+                    return Some(self.values[index]);
                 }
-                code <<= 1;
-                code |= i32::from(input.next_bit()?);
             }
-            Some(self.values[(code + self.val_offset[offset]) as usize])
+            None
         }
     }
 
     pub(crate) fn decode_fast_ac(&self, input: &mut Biterator) -> Result<Option<(i16, u8)>, ()> {
         if let Some(ac_lut) = &self.ac_lut {
-            eprintln!("---");
             if input.count < LUT_BITS {
-                eprintln!("FILL");
                 input.fill_bits();
                 if input.count < LUT_BITS {
                     return Ok(None);
@@ -181,20 +182,16 @@ impl Table {
     }
 }
 
-fn huffsize(bits: &[u8; 16]) -> Result<([u8; 256], usize), &'static str> {
-    let mut huffsize = [0u8; 256];
-    let mut p = 0usize;
+fn huffsize(bits: &[u8; 16]) -> Result<ArrayVec<[u8; 256]>, &'static str> {
+    let mut huffsize = ArrayVec::new();
     for (l, &value) in bits.iter().enumerate() {
         let value = usize::from(value);
-        if p + value > 256 {
+        if huffsize.len() + value > 256 {
             return Err("bad huffsize");
         }
-        for x in &mut huffsize[p..(p + value)] {
-            *x = l as u8 + 1;
-        }
-        p += value;
+        huffsize.extend(iter::repeat(l as u8 + 1).take(value));
     }
-    Ok((huffsize, p))
+    Ok(huffsize)
 }
 
 fn extend(v: u16, t: u8) -> i16 {
@@ -231,10 +228,6 @@ impl<'a> Biterator<'a> {
         Some(extend(value, count))
     }
 
-    fn next_bit(&mut self) -> Option<bool> {
-        self.next_bits(1).map(|b| b != 0)
-    }
-
     pub fn next_bits(&mut self, count: u8) -> Option<u16> {
         if self.count < count {
             self.fill_bits()?;
@@ -260,7 +253,7 @@ impl<'a> Biterator<'a> {
     }
 
     fn fill_bits(&mut self) -> Option<()> {
-        while self.count < 64 {
+        while self.count <= 56 {
             if self.input.is_empty() {
                 return None;
             }
@@ -270,7 +263,9 @@ impl<'a> Biterator<'a> {
                     0xFF
                 }
                 0xFF => {
-                    self.count = 64;
+                    while self.count <= 56 {
+                        self.count += 8;
+                    }
                     return Some(()); // Not a stuffed 0xFF so we found a marker.
                 }
                 b => {

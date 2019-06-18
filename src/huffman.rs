@@ -204,8 +204,8 @@ fn extend(v: u16, t: u8) -> i16 {
 }
 
 #[derive(Debug)]
-pub struct Biterator<'a> {
-    input: &'a [u8],
+pub(crate) struct Biterator<'a> {
+    pub(crate) input: &'a [u8],
     bits: u64,
     count: u8,
 }
@@ -226,6 +226,11 @@ impl<'a> Biterator<'a> {
     pub(crate) fn receive_extend(&mut self, count: u8) -> Option<i16> {
         let value = self.next_bits(count)?;
         Some(extend(value, count))
+    }
+
+    pub fn reset(&mut self) {
+        self.bits = 0;
+        self.count = 0;
     }
 
     pub fn next_bits(&mut self, count: u8) -> Option<u16> {

@@ -1,4 +1,3 @@
-
 use combine_jpeg::*;
 
 use std::{fs, iter, path::Path};

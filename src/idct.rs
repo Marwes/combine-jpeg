@@ -5,30 +5,39 @@
 // That's why wrapping operators are needed.
 
 // This is based on stb_image's 'stbi__idct_block'.
-pub fn dequantize_and_idct_block(coefficients: &[i16], quantization_table: &[u16; 64], output_linestride: usize, output: &mut [u8]) {
+pub fn dequantize_and_idct_block(
+    coefficients: &[i16],
+    quantization_table: &[u16; 64],
+    output_linestride: usize,
+    output: &mut [u8],
+) {
     debug_assert_eq!(coefficients.len(), 64);
 
     let mut temp = [0i32; 64];
 
     // columns
-    for i in 0 .. 8 {
+    for i in 0..8 {
         // if all zeroes, shortcut -- this avoids dequantizing 0s and IDCTing
-        if coefficients[i + 8] == 0 && coefficients[i + 16] == 0 && coefficients[i + 24] == 0 &&
-                coefficients[i + 32] == 0 && coefficients[i + 40] == 0 && coefficients[i + 48] == 0 &&
-                coefficients[i + 56] == 0 {
+        if coefficients[i + 8] == 0
+            && coefficients[i + 16] == 0
+            && coefficients[i + 24] == 0
+            && coefficients[i + 32] == 0
+            && coefficients[i + 40] == 0
+            && coefficients[i + 48] == 0
+            && coefficients[i + 56] == 0
+        {
             let dcterm = (coefficients[i] as i32 * quantization_table[i] as i32).wrapping_shl(2);
-            temp[i]      = dcterm;
-            temp[i + 8]  = dcterm;
+            temp[i] = dcterm;
+            temp[i + 8] = dcterm;
             temp[i + 16] = dcterm;
             temp[i + 24] = dcterm;
             temp[i + 32] = dcterm;
             temp[i + 40] = dcterm;
             temp[i + 48] = dcterm;
             temp[i + 56] = dcterm;
-        }
-        else {
-            let s0 = coefficients[i] as i32      * quantization_table[i] as i32;
-            let s1 = coefficients[i + 8] as i32  * quantization_table[i + 8] as i32;
+        } else {
+            let s0 = coefficients[i] as i32 * quantization_table[i] as i32;
+            let s1 = coefficients[i + 8] as i32 * quantization_table[i + 8] as i32;
             let s2 = coefficients[i + 16] as i32 * quantization_table[i + 16] as i32;
             let s3 = coefficients[i + 24] as i32 * quantization_table[i + 24] as i32;
             let s4 = coefficients[i + 32] as i32 * quantization_table[i + 32] as i32;
@@ -78,9 +87,9 @@ pub fn dequantize_and_idct_block(coefficients: &[i16], quantization_table: &[u16
             let x2 = x2.wrapping_add(512);
             let x3 = x3.wrapping_add(512);
 
-            temp[i]      = x0.wrapping_add(t3).wrapping_shr(10);
+            temp[i] = x0.wrapping_add(t3).wrapping_shr(10);
             temp[i + 56] = x0.wrapping_sub(t3).wrapping_shr(10);
-            temp[i + 8]  = x1.wrapping_add(t2).wrapping_shr(10);
+            temp[i + 8] = x1.wrapping_add(t2).wrapping_shr(10);
             temp[i + 48] = x1.wrapping_sub(t2).wrapping_shr(10);
             temp[i + 16] = x2.wrapping_add(t1).wrapping_shr(10);
             temp[i + 40] = x2.wrapping_sub(t1).wrapping_shr(10);
@@ -89,7 +98,7 @@ pub fn dequantize_and_idct_block(coefficients: &[i16], quantization_table: &[u16
         }
     }
 
-    for i in 0 .. 8 {
+    for i in 0..8 {
         // no fast case since the first 1D IDCT spread components out
         let s0 = temp[i * 8];
         let s1 = temp[i * 8 + 1];
@@ -146,7 +155,7 @@ pub fn dequantize_and_idct_block(coefficients: &[i16], quantization_table: &[u16
         let x2 = x2.wrapping_add(65536 + (128 << 17));
         let x3 = x3.wrapping_add(65536 + (128 << 17));
 
-        output[i * output_linestride]     = stbi_clamp(x0.wrapping_add(t3).wrapping_shr(17));
+        output[i * output_linestride] = stbi_clamp(x0.wrapping_add(t3).wrapping_shr(17));
         output[i * output_linestride + 7] = stbi_clamp(x0.wrapping_sub(t3).wrapping_shr(17));
         output[i * output_linestride + 1] = stbi_clamp(x1.wrapping_add(t2).wrapping_shr(17));
         output[i * output_linestride + 6] = stbi_clamp(x1.wrapping_sub(t2).wrapping_shr(17));
@@ -158,15 +167,18 @@ pub fn dequantize_and_idct_block(coefficients: &[i16], quantization_table: &[u16
 }
 
 // take a -128..127 value and stbi__clamp it and convert to 0..255
-fn stbi_clamp(x: i32) -> u8
-{
-   // trick to use a single test to catch both cases
-   if x as u32 > 255 {
-      if x < 0 { return 0; }
-      if x > 255 { return 255; }
-   }
+fn stbi_clamp(x: i32) -> u8 {
+    // trick to use a single test to catch both cases
+    if x as u32 > 255 {
+        if x < 0 {
+            return 0;
+        }
+        if x > 255 {
+            return 255;
+        }
+    }
 
-   x as u8
+    x as u8
 }
 
 fn stbi_f2f(x: f32) -> i32 {

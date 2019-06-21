@@ -69,10 +69,10 @@ where
     J::Error: ParseError<J::Item, J::Range, J::Position>,
 {
     be_u16()
-        .then_partial(|&mut len| take(usize::from(len)))
+        .then_partial(|&mut len| take(usize::from(len - 2))) // Check len >= 2
         .map_input(
             move |data, self_: &mut StateStream<I, Decoder>| -> Result<_, I::Error> {
-                eprintln!("{}", data.len());
+                eprintln!("{} {:?}", data.len(), data);
                 let mut stream = StateStream {
                     stream: J::from(data),
                     state: mem::replace(&mut self_.state, Default::default()),

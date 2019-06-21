@@ -58,15 +58,13 @@ where
     any().map(|b| (b >> 4, b & 0x0F))
 }
 
-fn segment_parser<'a, J, I, P, O>(
+fn segment<'a, I, P, O>(
     mut parser: P,
 ) -> impl Parser<Input = StateStream<I, Decoder>, Output = O> + 'a
 where
-    P: Parser<Output = O, Input = StateStream<J, Decoder>> + 'a,
-    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    P: Parser<Output = O, Input = StateStream<I, Decoder>> + 'a,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
-    J: FullRangeStream<Item = u8, Range = &'a [u8], Error = I::Error> + From<&'a [u8]> + 'a,
-    J::Error: ParseError<J::Item, J::Range, J::Position>,
 {
     be_u16()
         .then_partial(|&mut len| take(usize::from(len - 2))) // Check len >= 2
@@ -74,7 +72,7 @@ where
             move |data, self_: &mut StateStream<I, Decoder>| -> Result<_, I::Error> {
                 eprintln!("{} {:?}", data.len(), data);
                 let mut stream = StateStream {
-                    stream: J::from(data),
+                    stream: I::from(data),
                     state: mem::replace(&mut self_.state, Default::default()),
                 };
                 let result = parser.parse_with_state(&mut stream, &mut Default::default());
@@ -900,9 +898,9 @@ impl Decoder {
 
         dispatch!(marker;
             Marker::SOI | Marker::RST(_) | Marker::COM | Marker::EOI => value(()),
-            Marker::SOF(i) => segment_parser::<I, _, _, _>(sof(i)).map_input(move |frame, self_: &mut StateStream<I, Decoder>| self_.state.frame = Some(frame)),
+            Marker::SOF(i) => segment(sof(i)).map_input(move |frame, self_: &mut StateStream<I, Decoder>| self_.state.frame = Some(frame)),
             Marker::DHT => {
-                segment_parser::<I, _, _, _>(skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, Decoder>| {
+                segment(skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, Decoder>| {
                     let table =
                         huffman::Table::new(dht.code_lengths, dht.values, dht.table_class)
                             .unwrap(); // FIXME
@@ -916,13 +914,13 @@ impl Decoder {
                     }
                 })))
             },
-            Marker::DQT => segment_parser::<I, _, _, _>(skip_many1(dqt().map_input(move |dqt, self_: &mut StateStream<I, Decoder>| {
+            Marker::DQT => segment(skip_many1(dqt().map_input(move |dqt, self_: &mut StateStream<I, Decoder>| {
                 self_.state.quantization_tables[usize::from(dqt.identifier)] =
                     Some(QuantizationTable::new(&dqt));
             }))),
-            Marker::DRI => segment_parser::<I, _, _, _>(dri()).map_input(move |r, self_: &mut StateStream<I, Decoder>| self_.state.restart_interval = r),
+            Marker::DRI => segment(dri()).map_input(move |r, self_: &mut StateStream<I, Decoder>| self_.state.restart_interval = r),
             Marker::SOS => parser(move |input: &mut StateStream<I, Decoder>| {
-                let (scan, _rest) = segment_parser::<I, _, _, _>(sos())
+                let (scan, _rest) = segment(sos())
                     .parse_stream(input)
                     .into_result()?;
                 input.state.scan = Some(scan);
@@ -972,10 +970,10 @@ impl Decoder {
                 Ok(((), Consumed::Consumed(())))
             }),
             Marker::APP_ADOBE => {
-                segment_parser::<I, _, _, _>(app_adobe())
+                segment(app_adobe())
                     .map_input(move |color_transform, self_: &mut StateStream<I, Decoder>| self_.state.color_transform = Some(color_transform))
             },
-            Marker::APP(_) => segment_parser::<I, _, _, _>(value(())),
+            Marker::APP(_) => segment(value(())),
         )
     }
 }

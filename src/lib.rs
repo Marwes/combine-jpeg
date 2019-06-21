@@ -6,20 +6,25 @@ use derive_more::{Display, From};
 
 use combine::{
     dispatch, easy,
-    error::{Consumed, ParseError, StreamError},
+    error::{Consumed, ParseError, ParseResult, StreamError, UnexpectedParse},
     parser,
     parser::{
         byte::num::be_u16,
+        combinator::Converter,
         item::{any, eof, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, many1, skip_many1},
     },
-    stream::{user_state::StateStream, FullRangeStream, Positioned, StreamErrorFor},
-    Parser,
+    stream::{user_state::StateStream, FullRangeStream, PointerOffset, Positioned, StreamErrorFor},
+    Parser, StreamOnce,
 };
 
-use marker::{marker, Marker};
+use {
+    biterator::Biterator,
+    marker::{marker, Marker},
+};
 
+mod biterator;
 mod color_conversion;
 mod huffman;
 mod idct;
@@ -388,7 +393,8 @@ struct ScanHeader {
     ac_table_selector: u8,
 }
 
-fn sos<'a, 's, I>() -> impl Parser<Output = Scan, Input = StateStream<I, &'s mut Decoder>> + 'a
+fn sos_segment<'a, 's, I>(
+) -> impl Parser<Output = Scan, Input = StateStream<I, &'s mut Decoder>> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -468,6 +474,113 @@ where
         )
 }
 
+fn sos<'a, 's, I>() -> impl Parser<Output = (), Input = StateStream<I, &'s mut Decoder>> + 'a
+where
+    I: FullRangeStream<
+            Item = u8,
+            Range = &'a [u8],
+            Error = easy::Errors<u8, &'a [u8], PointerOffset<[u8]>>,
+        > + From<&'a [u8]>
+        + 'a,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    's: 'a,
+{
+    let f = move |is_final_scan: bool,
+                  biterator: &mut StateStream<biterator::Biterator<'a>, &'s mut Decoder>|
+          -> Result<_, _> {
+        let start = biterator.stream.clone().into_inner();
+        match biterator
+            .state
+            .decode_scan(&mut biterator.stream, is_final_scan)
+            .map_err(|msg| {
+                I::Error::from_error(
+                    I::from(biterator.stream.input).position(),
+                    StreamErrorFor::<I>::message_message(msg),
+                )
+            }) {
+            Ok(planes) => Ok(((), Consumed::Consumed(()))),
+            Err(err) => {
+                biterator.state.error = Some(
+                    err.map_position(|pos| pos.translate_position(start)) // FIXME this position is not from the start of the parse
+                        .map_token(|token| format!("0x{:X}", token))
+                        .map_range(|range| format!("{:?}", range))
+                        .into(),
+                );
+                Err(Consumed::Consumed(UnexpectedParse::Unexpected.into()))
+            }
+        }
+    };
+    segment(sos_segment())
+        .map_input(|scan, input: &mut StateStream<I, &'s mut Decoder>| {
+            input.state.scan = Some(scan);
+            let scan = input.state.scan.as_ref().unwrap();
+
+            // FIXME Propagate error
+            let frame = input.state.frame.as_ref().ok_or_else(|| {
+                I::Error::from_error(
+                    input.position(),
+                    StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
+                )
+            })?;
+            if frame.coding_process() == CodingProcess::Progressive {
+                unimplemented!();
+            }
+
+            if scan.low_approximation == 0 {
+                for i in scan.headers.iter().map(|header| header.component_index) {
+                    for j in scan.start_of_selection..=scan.end_of_selection {
+                        input.state.coefficients_finished[usize::from(i)] |= 1 << j;
+                    }
+                }
+            }
+
+            let is_final_scan = scan.headers.iter().all(|header| {
+                input.state.coefficients_finished[usize::from(header.component_index)] == !0
+            });
+            Ok(is_final_scan)
+        })
+        .flat_map(move |data| -> Result<_, I::Error> { data })
+        .then(|is_final_scan| {
+            combine::parser::combinator::input_converter(
+                parser(move |input| f(is_final_scan, input)),
+                BitConverter,
+            )
+        })
+}
+
+type DecoderStream<'s, I> = StateStream<I, &'s mut Decoder>;
+type BiteratorStream<'a, 's> = StateStream<Biterator<'a>, &'s mut Decoder>;
+struct BitConverter;
+impl<'a, 's, 'i, Input> Converter<StateStream<Input, &'s mut Decoder>, BiteratorStream<'a, 'i>>
+    for BitConverter
+where
+    Input: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]>,
+    Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
+    's: 'i,
+{
+    fn with_input<R>(
+        &mut self,
+        input: &mut DecoderStream<'s, Input>,
+        f: impl FnOnce(
+            &mut BiteratorStream<'a, 'i>,
+        ) -> ParseResult<R, <BiteratorStream<'a, 'i> as StreamOnce>::Error>,
+    ) -> ParseResult<R, <BiteratorStream<'a, 'i> as StreamOnce>::Error> {
+        let mut stream = StateStream {
+            stream: Biterator::new(input.range()),
+            state: &mut *input.state,
+        };
+        f(&mut stream)
+    }
+
+    fn convert_error(
+        &mut self,
+        input: &mut DecoderStream<'s, Input>,
+        error: <BiteratorStream<'a, 's> as StreamOnce>::Error,
+    ) -> <DecoderStream<'s, Input> as StreamOnce>::Error {
+        ParseError::empty(input.position())
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum AdobeColorTransform {
     Unknown = 0,
@@ -504,6 +617,7 @@ pub struct Decoder {
     color_transform: Option<AdobeColorTransform>,
     restart_interval: u16,
     coefficients_finished: [u64; MAX_COMPONENTS],
+    error: Option<Error>, // TODO Remove
 }
 
 impl Decoder {
@@ -553,7 +667,7 @@ impl Decoder {
 
     fn decode_scan<'a>(
         &'a self,
-        input: &mut huffman::Biterator,
+        input: &mut biterator::Biterator,
         produce_data: bool,
     ) -> Result<impl Iterator<Item = Vec<u8>> + 'a> {
         let frame = self.frame.as_ref().unwrap();
@@ -798,7 +912,7 @@ impl Decoder {
         scan: &Scan,
         dc_table: &huffman::Table,
         ac_table: &huffman::Table,
-        input: &mut huffman::Biterator,
+        input: &mut biterator::Biterator,
         eob_run: &mut u16,
         dc_predictor: &mut i16,
     ) -> Result<(), &'static str> {
@@ -888,7 +1002,12 @@ impl Decoder {
         marker: Marker,
     ) -> impl Parser<Input = StateStream<I, &'s mut Decoder>, Output = ()> + 'a
     where
-        I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
+        I: FullRangeStream<
+                Item = u8,
+                Range = &'a [u8],
+                Error = easy::Errors<u8, &'a [u8], PointerOffset<[u8]>>,
+            > + From<&'a [u8]>
+            + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
         's: 'a,
     {
@@ -917,56 +1036,7 @@ impl Decoder {
                     Some(QuantizationTable::new(&dqt));
             }))),
             Marker::DRI => segment(dri()).map_input(move |r, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.restart_interval = r),
-            Marker::SOS => parser(move |input: &mut StateStream<I, &'s mut Decoder>| {
-                let (scan, _rest) = segment(sos())
-                    .parse_stream(input)
-                    .into_result()?;
-                input.state.scan = Some(scan);
-                let scan = input.state.scan.as_ref().unwrap();
-
-                let frame = input
-                    .state
-                    .frame
-                    .as_ref()
-                    .ok_or_else(|| {
-                        I::Error::from_error(
-                            input.position(),
-                            StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
-                        )
-                    })
-                    .map_err(|err| Consumed::Consumed(err.into()))?;
-                if frame.coding_process() == CodingProcess::Progressive {
-                    unimplemented!();
-                }
-
-                if scan.low_approximation == 0 {
-                    for i in scan.headers.iter().map(|header| header.component_index) {
-                        for j in scan.start_of_selection..=scan.end_of_selection {
-                            input.state.coefficients_finished[usize::from(i)] |= 1 << j;
-                        }
-                    }
-                }
-
-                let is_final_scan = scan.headers.iter().all(|header| {
-                    input.state.coefficients_finished[usize::from(header.component_index)] == !0
-                });
-
-                let mut biterator = huffman::Biterator::new(input.range());
-                let planes = input.state
-                    .decode_scan(&mut biterator, is_final_scan)
-                    .map_err(|msg| {
-                        I::Error::from_error(
-                            input.position(),
-                            StreamErrorFor::<I>::message_message(msg),
-                        )
-                    })
-                    .map_err(|err| Consumed::Consumed(err.into()))?
-                    .collect();
-                input.state.planes = planes;
-                input.stream = I::from(biterator.into_inner());
-
-                Ok(((), Consumed::Consumed(())))
-            }),
+            Marker::SOS => sos(),
             Marker::APP_ADOBE => {
                 segment(app_adobe())
                     .map_input(move |color_transform, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.color_transform = Some(color_transform))

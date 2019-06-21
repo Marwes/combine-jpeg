@@ -2,6 +2,8 @@ use std::iter;
 
 use arrayvec::ArrayVec;
 
+use crate::biterator::{extend, Biterator};
+
 #[derive(Copy, Clone, Debug)]
 pub enum TableClass {
     DC = 0,
@@ -130,9 +132,9 @@ impl Table {
     }
 
     pub(crate) fn decode(&self, input: &mut Biterator) -> Option<u8> {
-        if input.count < 16 {
+        if input.count() < 16 {
             input.fill_bits();
-            if input.count < LUT_BITS {
+            if input.count() < LUT_BITS {
                 return None;
             }
         }
@@ -160,9 +162,9 @@ impl Table {
 
     pub(crate) fn decode_fast_ac(&self, input: &mut Biterator) -> Result<Option<(i16, u8)>, ()> {
         if let Some(ac_lut) = &self.ac_lut {
-            if input.count < LUT_BITS {
+            if input.count() < LUT_BITS {
                 input.fill_bits();
-                if input.count < LUT_BITS {
+                if input.count() < LUT_BITS {
                     return Ok(None);
                 }
             }
@@ -192,97 +194,6 @@ fn huffsize(bits: &[u8; 16]) -> Result<ArrayVec<[u8; 256]>, &'static str> {
         huffsize.extend(iter::repeat(l as u8 + 1).take(value));
     }
     Ok(huffsize)
-}
-
-fn extend(v: u16, t: u8) -> i16 {
-    let vt = 1 << (u16::from(t) - 1);
-    if v < vt {
-        v as i16 + (-1 << i16::from(t)) + 1
-    } else {
-        v as i16
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct Biterator<'a> {
-    pub(crate) input: &'a [u8],
-    bits: u64,
-    count: u8,
-}
-
-impl<'a> Biterator<'a> {
-    pub fn new(input: &'a [u8]) -> Self {
-        Biterator {
-            input,
-            bits: 0,
-            count: 0,
-        }
-    }
-
-    pub(crate) fn into_inner(self) -> &'a [u8] {
-        self.input
-    }
-
-    pub(crate) fn receive_extend(&mut self, count: u8) -> Option<i16> {
-        let value = self.next_bits(count)?;
-        Some(extend(value, count))
-    }
-
-    pub fn reset(&mut self) {
-        self.bits = 0;
-        self.count = 0;
-    }
-
-    pub fn next_bits(&mut self, count: u8) -> Option<u16> {
-        if self.count < count {
-            self.fill_bits()?;
-        }
-        if self.count < count {
-            return None;
-        }
-        let bits = self.peek_bits(count);
-        self.consume_bits(count);
-        Some(bits)
-    }
-
-    fn consume_bits(&mut self, count: u8) {
-        debug_assert!(self.count >= count);
-        self.bits <<= count;
-        self.count -= count;
-    }
-
-    fn peek_bits(&self, count: u8) -> u16 {
-        debug_assert!(self.count >= count);
-
-        ((self.bits >> (64 - count)) & ((1 << count) - 1)) as u16
-    }
-
-    fn fill_bits(&mut self) -> Option<()> {
-        while self.count <= 56 {
-            if self.input.is_empty() {
-                return None;
-            }
-            let b = match self.input[0] {
-                0xFF if self.input.get(1) == Some(&0x00) => {
-                    self.input = &self.input[2..];
-                    0xFF
-                }
-                0xFF => {
-                    while self.count <= 56 {
-                        self.count += 8;
-                    }
-                    return Some(()); // Not a stuffed 0xFF so we found a marker.
-                }
-                b => {
-                    self.input = &self.input[1..];
-                    b
-                }
-            };
-            self.bits |= u64::from(b) << 56 - self.count;
-            self.count += 8;
-        }
-        Some(())
-    }
 }
 
 #[cfg(test)]

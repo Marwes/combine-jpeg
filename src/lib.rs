@@ -72,6 +72,7 @@ where
         .then_partial(|&mut len| take(usize::from(len)))
         .map_input(
             move |data, self_: &mut StateStream<I, Decoder>| -> Result<_, I::Error> {
+                eprintln!("{}", data.len());
                 let mut stream = StateStream {
                     stream: J::from(data),
                     state: mem::replace(&mut self_.state, Default::default()),
@@ -82,31 +83,6 @@ where
             },
         )
         .flat_map(move |data| -> Result<_, I::Error> { data })
-}
-
-#[derive(Copy, Clone, Debug)]
-struct Segment<'a> {
-    marker: Marker,
-    data: &'a [u8],
-}
-
-fn segment<'a, I>() -> impl Parser<Output = Segment<'a>, Input = I>
-where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-{
-    marker().then_partial(|&mut marker| {
-        match marker {
-        Marker::SOI | Marker::EOI => {
-            Parser::left(value(Segment { marker, data: &[] }))
-        }
-        Marker::SOF(_) | Marker::DHT | Marker::DQT | Marker::SOS | Marker::APP(_) | Marker::COM |
-        Marker::RST(_) |Marker::DRI => be_u16() // TODO Check length >= 2
-            .then(|quantization_table_len| take((quantization_table_len - 2).into()))
-            .map(move |data| Segment { marker, data })
-            .right(),
-    }
-    })
 }
 
 #[derive(Default, Copy, Clone)]
@@ -537,7 +513,7 @@ impl Decoder {
     pub fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>> {
         {
             let mut parser = many1::<Vec<_>, _>(
-                segment().then_partial(move |&mut segment| Self::do_segment(segment.marker)),
+                marker().then_partial(move |&mut marker| Self::do_segment(marker)),
             )
             .skip(eof());
             let (_, stream) = parser
@@ -925,7 +901,7 @@ impl Decoder {
             Marker::SOI | Marker::RST(_) | Marker::COM | Marker::EOI => value(()),
             Marker::SOF(i) => segment_parser::<I, _, _, _>(sof(i)).map_input(move |frame, self_: &mut StateStream<I, Decoder>| self_.state.frame = Some(frame)),
             Marker::DHT => {
-                skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, Decoder>| {
+                segment_parser::<I, _, _, _>(skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, Decoder>| {
                     let table =
                         huffman::Table::new(dht.code_lengths, dht.values, dht.table_class)
                             .unwrap(); // FIXME
@@ -937,12 +913,12 @@ impl Decoder {
                             self_.state.dc_huffman_tables[usize::from(dht.destination)] = Some(table)
                         }
                     }
-                }))
+                })))
             },
-            Marker::DQT => skip_many1(segment_parser::<I, _, _, _>(dqt()).map_input(move |dqt, self_: &mut StateStream<I, Decoder>| {
+            Marker::DQT => segment_parser::<I, _, _, _>(skip_many1(dqt().map_input(move |dqt, self_: &mut StateStream<I, Decoder>| {
                 self_.state.quantization_tables[usize::from(dqt.identifier)] =
                     Some(QuantizationTable::new(&dqt));
-            })),
+            }))),
             Marker::DRI => segment_parser::<I, _, _, _>(dri()).map_input(move |r, self_: &mut StateStream<I, Decoder>| self_.state.restart_interval = r),
             Marker::SOS => parser(move |input: &mut StateStream<I, Decoder>| {
                 let (scan, _rest) = segment_parser::<I, _, _, _>(sos())

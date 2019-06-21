@@ -58,6 +58,32 @@ where
     any().map(|b| (b >> 4, b & 0x0F))
 }
 
+fn segment_parser<'a, J, I, P, O>(
+    mut parser: P,
+) -> impl Parser<Input = StateStream<I, Decoder>, Output = O> + 'a
+where
+    P: Parser<Output = O, Input = StateStream<J, Decoder>> + 'a,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    J: FullRangeStream<Item = u8, Range = &'a [u8], Error = I::Error> + From<&'a [u8]> + 'a,
+    J::Error: ParseError<J::Item, J::Range, J::Position>,
+{
+    be_u16()
+        .then_partial(|&mut len| take(usize::from(len)))
+        .map_input(
+            move |data, self_: &mut StateStream<I, Decoder>| -> Result<_, I::Error> {
+                let mut stream = StateStream {
+                    stream: J::from(data),
+                    state: mem::replace(&mut self_.state, Default::default()),
+                };
+                let result = parser.parse_with_state(&mut stream, &mut Default::default());
+                self_.state = stream.state;
+                result
+            },
+        )
+        .flat_map(move |data| -> Result<_, I::Error> { data })
+}
+
 #[derive(Copy, Clone, Debug)]
 struct Segment<'a> {
     marker: Marker,
@@ -389,13 +415,12 @@ struct ScanHeader {
 }
 
 parser! {
-fn sos['a, 'f, I](frame: &'f Frame)(I) -> Scan
+fn sos['a, I]()(StateStream<I, Decoder>) -> Scan
 where [
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 ]
 {
-    let frame = *frame;
     let mut max_index: Option<u8> = None;
     (
         any().then_partial(move |&mut image_components| {
@@ -403,8 +428,15 @@ where [
             count_min_max::<Vec<_>, _>(
                 image_components,
                 image_components,
-                (any(), split_4_bit()).and_then(
-                    move |(component_identifier, (dc_table_selector, ac_table_selector))| -> Result<_, StreamErrorFor<I>> {
+                (any(), split_4_bit()).map_input(
+                    move |(component_identifier, (dc_table_selector, ac_table_selector)), self_: &mut StateStream<I, Decoder>| -> Result<_, StreamErrorFor<I>> {
+                        let frame = self_
+                            .state
+                            .frame
+                            .as_ref()
+                            .ok_or_else(|| {
+                                StreamErrorFor::<I>::message_static_message("Found SOS before SOF")
+                            })?;
                         debug_assert!(frame.components.len() <= 256);
                         let component_index = frame
                             .components
@@ -438,7 +470,8 @@ where [
                             ac_table_selector,
                         })
                     },
-                ),
+                )
+                .and_then(|result| result),
             )
         }),
         any(),
@@ -507,16 +540,17 @@ impl Decoder {
                 segment().then_partial(move |&mut segment| Self::do_segment(segment.marker)),
             )
             .skip(eof());
-            parser
+            let (_, stream) = parser
                 .parse(StateStream {
                     stream: easy::Stream(input),
-                    state: self,
+                    state: mem::replace(self, Default::default()),
                 })
                 .map_err(|err| {
                     err.map_position(|pos| pos.translate_position(input))
                         .map_token(|token| format!("0x{:X}", token))
                         .map_range(|range| format!("{:?}", range))
                 })?;
+            *self = stream.state;
         }
 
         let is_jfif = false; // TODO
@@ -880,7 +914,7 @@ impl Decoder {
 
     fn do_segment<'a, 's, I>(
         marker: Marker,
-    ) -> impl Parser<Input = StateStream<I, &'s mut Decoder>, Output = ()>
+    ) -> impl Parser<Input = StateStream<I, Decoder>, Output = ()> + 'a
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -889,9 +923,9 @@ impl Decoder {
 
         dispatch!(marker;
             Marker::SOI | Marker::RST(_) | Marker::COM | Marker::EOI => value(()),
-            Marker::SOF(i) => sof(i).map_input(move |frame, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.frame = Some(frame)),
+            Marker::SOF(i) => segment_parser::<I, _, _, _>(sof(i)).map_input(move |frame, self_: &mut StateStream<I, Decoder>| self_.state.frame = Some(frame)),
             Marker::DHT => {
-                skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, &'s mut Decoder>| {
+                skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, Decoder>| {
                     let table =
                         huffman::Table::new(dht.code_lengths, dht.values, dht.table_class)
                             .unwrap(); // FIXME
@@ -905,12 +939,18 @@ impl Decoder {
                     }
                 }))
             },
-            Marker::DQT => skip_many1(dqt().map_input(move |dqt, self_: &mut StateStream<I, &'s mut Decoder>| {
+            Marker::DQT => skip_many1(segment_parser::<I, _, _, _>(dqt()).map_input(move |dqt, self_: &mut StateStream<I, Decoder>| {
                 self_.state.quantization_tables[usize::from(dqt.identifier)] =
                     Some(QuantizationTable::new(&dqt));
             })),
-            Marker::DRI => dri().map_input(move |r, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.restart_interval = r),
-            Marker::SOS => parser(move |input: &mut StateStream<I, &'s mut Decoder>| {
+            Marker::DRI => segment_parser::<I, _, _, _>(dri()).map_input(move |r, self_: &mut StateStream<I, Decoder>| self_.state.restart_interval = r),
+            Marker::SOS => parser(move |input: &mut StateStream<I, Decoder>| {
+                let (scan, _rest) = segment_parser::<I, _, _, _>(sos())
+                    .parse_stream(input)
+                    .into_result()?;
+                input.state.scan = Some(scan);
+                let scan = input.state.scan.as_ref().unwrap();
+
                 let frame = input
                     .state
                     .frame
@@ -922,12 +962,6 @@ impl Decoder {
                         )
                     })
                     .map_err(|err| Consumed::Consumed(err.into()))?;
-                let (scan, _rest) = sos(frame)
-                    .parse(input)
-                    .map_err(|err| Consumed::Consumed(err.into()))?;
-                input.state.scan = Some(scan);
-                let scan = input.state.scan.as_ref().unwrap();
-
                 if frame.coding_process() == CodingProcess::Progressive {
                     unimplemented!();
                 }
@@ -961,10 +995,10 @@ impl Decoder {
                 Ok(((), Consumed::Consumed(())))
             }),
             Marker::APP_ADOBE => {
-                app_adobe()
-                    .map_input(move |color_transform, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.color_transform = Some(color_transform))
+                segment_parser::<I, _, _, _>(app_adobe())
+                    .map_input(move |color_transform, self_: &mut StateStream<I, Decoder>| self_.state.color_transform = Some(color_transform))
             },
-            Marker::APP(_) => value(()),
+            Marker::APP(_) => segment_parser::<I, _, _, _>(value(())),
         )
     }
 }

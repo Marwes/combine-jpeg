@@ -388,12 +388,11 @@ struct ScanHeader {
     ac_table_selector: u8,
 }
 
-parser! {
-fn sos['a, 's, I]()(StateStream<I, &'s mut Decoder>) -> Scan
-where [
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+fn sos<'a, 's, I>() -> impl Parser<Output = Scan, Input = StateStream<I, &'s mut Decoder>> + 'a
+where
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
-]
+    's: 'a,
 {
     let mut max_index: Option<u8> = None;
     (
@@ -402,50 +401,51 @@ where [
             count_min_max::<Vec<_>, _>(
                 image_components,
                 image_components,
-                (any(), split_4_bit()).map_input(
-                    move |(component_identifier, (dc_table_selector, ac_table_selector)), self_: &mut StateStream<I, &'s mut Decoder>| -> Result<_, StreamErrorFor<I>> {
-                        let frame = self_
-                            .state
-                            .frame
-                            .as_ref()
-                            .ok_or_else(|| {
+                (any(), split_4_bit())
+                    .map_input(
+                        move |(component_identifier, (dc_table_selector, ac_table_selector)),
+                              self_: &mut StateStream<I, &'s mut Decoder>|
+                              -> Result<_, StreamErrorFor<I>> {
+                            let frame = self_.state.frame.as_ref().ok_or_else(|| {
                                 StreamErrorFor::<I>::message_static_message("Found SOS before SOF")
                             })?;
-                        debug_assert!(frame.components.len() <= 256);
-                        let component_index = frame
-                            .components
-                            .iter()
-                            .position(|c| c.component_identifier == component_identifier)
-                            .ok_or_else(|| {
-                                StreamErrorFor::<I>::message_static_message(
-                                    "Component does not exist in frame",
-                                )
-                            })? as u8;
+                            debug_assert!(frame.components.len() <= 256);
+                            let component_index = frame
+                                .components
+                                .iter()
+                                .position(|c| c.component_identifier == component_identifier)
+                                .ok_or_else(|| {
+                                    StreamErrorFor::<I>::message_static_message(
+                                        "Component does not exist in frame",
+                                    )
+                                })? as u8;
 
-                        if let Some(max_index) = max_index {
-                            use std::cmp::Ordering;
-                            match component_index.cmp(&max_index) {
-                                Ordering::Less =>
-                                    return Err(StreamErrorFor::<I>::message_static_message(
-                                        "Component index is smaller than the previous indicies"
-                                    )),
-                                Ordering::Equal =>
-                                    return Err(StreamErrorFor::<I>::message_static_message(
-                                        "Component index is is not unique"
-                                    )),
-                                Ordering::Greater => (),
+                            if let Some(max_index) = max_index {
+                                use std::cmp::Ordering;
+                                match component_index.cmp(&max_index) {
+                                    Ordering::Less => {
+                                        return Err(StreamErrorFor::<I>::message_static_message(
+                                            "Component index is smaller than the previous indicies",
+                                        ))
+                                    }
+                                    Ordering::Equal => {
+                                        return Err(StreamErrorFor::<I>::message_static_message(
+                                            "Component index is is not unique",
+                                        ))
+                                    }
+                                    Ordering::Greater => (),
+                                }
                             }
-                        }
-                        max_index = Some(component_index);
+                            max_index = Some(component_index);
 
-                        Ok(ScanHeader {
-                            component_index,
-                            dc_table_selector,
-                            ac_table_selector,
-                        })
-                    },
-                )
-                .and_then(|result| result),
+                            Ok(ScanHeader {
+                                component_index,
+                                dc_table_selector,
+                                ac_table_selector,
+                            })
+                        },
+                    )
+                    .and_then(|result| result),
             )
         }),
         any(),
@@ -466,7 +466,6 @@ where [
                 low_approximation,
             },
         )
-}
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]

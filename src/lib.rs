@@ -78,6 +78,7 @@ where
                     state: mem::replace(&mut self_.state, Default::default()),
                 };
                 let result = parser.parse_with_state(&mut stream, &mut Default::default());
+                eprintln!("DONE");
                 self_.state = stream.state;
                 result
             },

@@ -6,17 +6,16 @@ use derive_more::{Display, From};
 
 use combine::{
     dispatch, easy,
-    error::{Consumed, ParseError, ParseResult, StreamError, UnexpectedParse},
+    error::{Consumed, ParseError, StreamError},
     parser,
     parser::{
         byte::num::be_u16,
-        combinator::Converter,
         item::{any, eof, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, many1, skip_many1},
     },
     stream::{user_state::StateStream, FullRangeStream, PointerOffset, Positioned, StreamErrorFor},
-    Parser, StreamOnce,
+    Parser,
 };
 
 use {
@@ -485,33 +484,35 @@ where
     I::Error: ParseError<I::Item, I::Range, I::Position>,
     's: 'a,
 {
-    let f = move |is_final_scan: bool,
-                  biterator: &mut StateStream<biterator::Biterator<'a>, &'s mut Decoder>|
-          -> Result<_, _> {
+    let f = move |is_final_scan: bool, input: &mut DecoderStream<'s, I>| -> Result<_, _> {
+        let mut biterator = StateStream {
+            stream: Biterator::new(input.range()),
+            state: &mut *input.state,
+        };
+
         let start = biterator.stream.clone().into_inner();
-        match biterator
+
+        let result = biterator
             .state
             .decode_scan(&mut biterator.stream, is_final_scan)
             .map_err(|msg| {
-                I::Error::from_error(
-                    I::from(biterator.stream.input).position(),
-                    StreamErrorFor::<I>::message_message(msg),
+                Consumed::Consumed(
+                    I::Error::from_error(
+                        I::from(biterator.stream.input).position(),
+                        StreamErrorFor::<I>::message_message(msg),
+                    )
+                    .into(),
                 )
-            }) {
-            Ok(planes) => Ok(((), Consumed::Consumed(()))),
-            Err(err) => {
-                biterator.state.error = Some(
-                    err.map_position(|pos| pos.translate_position(start)) // FIXME this position is not from the start of the parse
-                        .map_token(|token| format!("0x{:X}", token))
-                        .map_range(|range| format!("{:?}", range))
-                        .into(),
-                );
-                Err(Consumed::Consumed(UnexpectedParse::Unexpected.into()))
-            }
-        }
+            })
+            .map(|iter| iter.collect::<Vec<_>>());
+
+        input.stream = I::from(biterator.stream.into_inner());
+
+        input.state.planes = result?;
+        Ok(((), Consumed::Consumed(())))
     };
     segment(sos_segment())
-        .map_input(|scan, input: &mut StateStream<I, &'s mut Decoder>| {
+        .map_input(move |scan, input: &mut StateStream<I, &'s mut Decoder>| {
             input.state.scan = Some(scan);
             let scan = input.state.scan.as_ref().unwrap();
 
@@ -540,46 +541,11 @@ where
             Ok(is_final_scan)
         })
         .flat_map(move |data| -> Result<_, I::Error> { data })
-        .then(|is_final_scan| {
-            combine::parser::combinator::input_converter(
-                parser(move |input| f(is_final_scan, input)),
-                BitConverter,
-            )
-        })
+        .then(move |is_final_scan| parser(move |input| f(is_final_scan, input)))
 }
 
 type DecoderStream<'s, I> = StateStream<I, &'s mut Decoder>;
 type BiteratorStream<'a, 's> = StateStream<Biterator<'a>, &'s mut Decoder>;
-struct BitConverter;
-impl<'a, 's, 'i, Input> Converter<StateStream<Input, &'s mut Decoder>, BiteratorStream<'a, 'i>>
-    for BitConverter
-where
-    Input: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]>,
-    Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
-    's: 'i,
-{
-    fn with_input<R>(
-        &mut self,
-        input: &mut DecoderStream<'s, Input>,
-        f: impl FnOnce(
-            &mut BiteratorStream<'a, 'i>,
-        ) -> ParseResult<R, <BiteratorStream<'a, 'i> as StreamOnce>::Error>,
-    ) -> ParseResult<R, <BiteratorStream<'a, 'i> as StreamOnce>::Error> {
-        let mut stream = StateStream {
-            stream: Biterator::new(input.range()),
-            state: &mut *input.state,
-        };
-        f(&mut stream)
-    }
-
-    fn convert_error(
-        &mut self,
-        input: &mut DecoderStream<'s, Input>,
-        error: <BiteratorStream<'a, 's> as StreamOnce>::Error,
-    ) -> <DecoderStream<'s, Input> as StreamOnce>::Error {
-        ParseError::empty(input.position())
-    }
-}
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum AdobeColorTransform {
@@ -617,7 +583,6 @@ pub struct Decoder {
     color_transform: Option<AdobeColorTransform>,
     restart_interval: u16,
     coefficients_finished: [u64; MAX_COMPONENTS],
-    error: Option<Error>, // TODO Remove
 }
 
 impl Decoder {

@@ -35,9 +35,9 @@ impl Marker {
     pub const APP_ADOBE: Marker = Marker::APP(14);
 }
 
-pub fn marker<'a, I>() -> impl Parser<Output = Marker, Input = I>
+pub fn marker<'a, I>() -> impl Parser<I, Output = Marker> + 'a
 where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     #[derive(Clone)]
@@ -58,7 +58,7 @@ where
         }
     }
 
-    sep_by1::<Sink, _, _>(
+    sep_by1::<Sink, _, _, _>(
         (
             take_until_byte(0xFF),      // mozjpeg skips any non marker bytes (non 0xFF)
             take_while1(|b| b == 0xFF), // Extraenous 0xFF bytes are allowed

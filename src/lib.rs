@@ -54,7 +54,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 const MAX_COMPONENTS: usize = 4;
 
-fn split_4_bit<'a, I>() -> impl Parser<Output = (u8, u8), Input = I>
+fn split_4_bit<'a, I>() -> impl Parser<I, Output = (u8, u8)>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -64,9 +64,9 @@ where
 
 fn segment<'a, 's, I, P, O>(
     mut parser: P,
-) -> impl Parser<Input = StateStream<I, &'s mut Decoder>, Output = O> + 'a
+) -> impl Parser<StateStream<I, &'s mut Decoder>, Output = O> + 'a
 where
-    P: Parser<Output = O, Input = StateStream<I, &'s mut Decoder>> + 'a,
+    P: Parser<StateStream<I, &'s mut Decoder>, Output = O> + 'a,
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
     's: 'a,
@@ -144,7 +144,7 @@ pub struct Component {
     pub size: Dimensions,
 }
 
-fn sof<'a, I>(marker_index: u8) -> impl Parser<Output = Frame, Input = I>
+fn sof<'a, I>(marker_index: u8) -> impl Parser<I, Output = Frame>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -243,7 +243,7 @@ struct DHT<'a> {
     values: &'a [u8],
 }
 
-fn huffman_table<'a, I>() -> impl Parser<Output = DHT<'a>, Input = I> + 'a
+fn huffman_table<'a, I>() -> impl Parser<I, Output = DHT<'a>> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -337,7 +337,7 @@ impl DQTPrecision {
     }
 }
 
-fn dqt<'a, I>() -> impl Parser<Output = DQT, Input = I> + 'a
+fn dqt<'a, I>() -> impl Parser<I, Output = DQT> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -368,7 +368,7 @@ where
         .message("DQT")
 }
 
-fn dri<'a, I>() -> impl Parser<Output = u16, Input = I>
+fn dri<'a, I>() -> impl Parser<I, Output = u16>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -392,8 +392,7 @@ struct ScanHeader {
     ac_table_selector: u8,
 }
 
-fn sos_segment<'a, 's, I>(
-) -> impl Parser<Output = Scan, Input = StateStream<I, &'s mut Decoder>> + 'a
+fn sos_segment<'a, 's, I>() -> impl Parser<StateStream<I, &'s mut Decoder>, Output = Scan> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -403,7 +402,7 @@ where
     (
         any().then_partial(move |&mut image_components| {
             let image_components = usize::from(image_components);
-            count_min_max::<Vec<_>, _>(
+            count_min_max::<Vec<_>, _, _>(
                 image_components,
                 image_components,
                 (any(), split_4_bit())
@@ -473,7 +472,7 @@ where
         )
 }
 
-fn sos<'a, 's, I>() -> impl Parser<Output = (), Input = StateStream<I, &'s mut Decoder>> + 'a
+fn sos<'a, 's, I>() -> impl Parser<StateStream<I, &'s mut Decoder>, Output = ()> + 'a
 where
     I: FullRangeStream<
             Item = u8,
@@ -554,9 +553,9 @@ enum AdobeColorTransform {
     YCCK = 2,
 }
 
-fn app_adobe<'a, I>() -> impl Parser<Output = AdobeColorTransform, Input = I>
+fn app_adobe<'a, I>() -> impl Parser<I, Output = AdobeColorTransform> + 'a
 where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     range(&b"Adobe\0"[..]).skip(take(5)).with(
@@ -588,10 +587,9 @@ pub struct Decoder {
 impl Decoder {
     pub fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>> {
         {
-            let mut parser = many1::<Vec<_>, _>(
-                marker().then_partial(move |&mut marker| Self::do_segment(marker)),
-            )
-            .skip(eof());
+            let mut parser =
+                skip_many1(marker().then_partial(move |&mut marker| Self::do_segment(marker)))
+                    .skip(eof());
             parser
                 .parse(StateStream {
                     stream: easy::Stream(input),
@@ -965,7 +963,7 @@ impl Decoder {
 
     fn do_segment<'a, 's, I>(
         marker: Marker,
-    ) -> impl Parser<Input = StateStream<I, &'s mut Decoder>, Output = ()> + 'a
+    ) -> impl Parser<StateStream<I, &'s mut Decoder>, Output = ()> + 'a
     where
         I: FullRangeStream<
                 Item = u8,

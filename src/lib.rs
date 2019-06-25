@@ -514,7 +514,7 @@ impl Decoder {
                 marker().then_partial(move |&mut marker| Self::do_segment(marker)),
             )
             .skip(eof());
-            let (_, stream) = parser
+            parser
                 .parse(StateStream {
                     stream: easy::Stream(input),
                     state: self,

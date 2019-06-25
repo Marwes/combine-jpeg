@@ -69,13 +69,13 @@ where
         satisfy_map(|b| {
             Some(match b {
                 0xD8 => Marker::SOI,
-                0xC0...0xC2 => Marker::SOF(b - 0xC0),
+                0xC0..=0xC2 => Marker::SOF(b - 0xC0),
                 0xC4 => Marker::DHT,
                 0xDB => Marker::DQT,
                 0xDD => Marker::DRI,
                 0xDA => Marker::SOS,
-                0xD0...0xD7 => Marker::RST(b - 0xD0),
-                0xE0...0xEF => Marker::APP(b - 0xE0),
+                0xD0..=0xD7 => Marker::RST(b - 0xD0),
+                0xE0..=0xEF => Marker::APP(b - 0xE0),
                 0xD9 => Marker::EOI,
                 0xFE => Marker::COM,
                 _ => return None,

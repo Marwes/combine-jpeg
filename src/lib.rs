@@ -13,6 +13,7 @@ use combine::{
         item::{any, eof, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, many1, skip_many1},
+        ParseMode,
     },
     stream::{
         user_state::StateStream, FullRangeStream, PointerOffset, Positioned, ResetStream,
@@ -473,6 +474,42 @@ where
         )
 }
 
+struct InputConverter<P> {
+    parser: P,
+}
+impl<'s, 'a, Input, P, O, S> Parser<DecoderStream<'s, Input>> for InputConverter<P>
+where
+    Input: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
+    Input::Position: Default,
+    P: Parser<BiteratorStream<'s, Input>, Output = O, PartialState = S>,
+    S: Default,
+{
+    type Output = O;
+    type PartialState = S;
+
+    combine::parse_mode!(DecoderStream<'s, Input>);
+
+    fn parse_mode_impl<M>(
+        &mut self,
+        mode: M,
+        input: &mut DecoderStream<'s, Input>,
+        state: &mut Self::PartialState,
+    ) -> ParseResult<Self::Output, Input::Error>
+    where
+        M: ParseMode,
+    {
+        self.parser
+            .parse_mode(mode, &mut input.0, state)
+            .map_err(|err| {
+                Input::Error::from_error(
+                    input.position(),
+                    StreamErrorFor::<Input>::message_message(err),
+                )
+            })
+    }
+}
+
 fn sos<'a, 's, I>() -> impl Parser<DecoderStream<'s, I>, Output = ()> + 'a
 where
     I: FullRangeStream<
@@ -485,25 +522,21 @@ where
     I::Position: Default,
     's: 'a,
 {
-    let f = move |is_final_scan: bool, input: &mut DecoderStream<'s, I>| -> Result<_, _> {
-        let biterator = &mut input.0;
+    let f = move |is_final_scan: bool| InputConverter {
+        parser: parser(
+            move |biterator: &mut BiteratorStream<'s, I>| -> Result<_, _> {
+                let result = biterator
+                    .state
+                    .decode_scan(&mut biterator.stream, is_final_scan)
+                    .map(|iter| iter.collect::<Vec<_>>())
+                    .map_err(|msg| {
+                        Consumed::Consumed(combine::error::UnexpectedParse::Unexpected.into())
+                    });
 
-        let result = biterator
-            .state
-            .decode_scan(&mut biterator.stream, is_final_scan)
-            .map(|iter| iter.collect::<Vec<_>>())
-            .map_err(|msg| {
-                Consumed::Consumed(
-                    I::Error::from_error(
-                        input.position(),
-                        StreamErrorFor::<I>::message_message(msg),
-                    )
-                    .into(),
-                )
-            });
-
-        input.state.planes = result?;
-        Ok(((), Consumed::Consumed(())))
+                biterator.state.planes = result?;
+                Ok(((), Consumed::Consumed(())))
+            },
+        ),
     };
     segment(sos_segment())
         .map_input(move |scan, input: &mut DecoderStream<'s, I>| {
@@ -535,7 +568,7 @@ where
             Ok(is_final_scan)
         })
         .flat_map(move |data| -> Result<_, I::Error> { data })
-        .then(move |is_final_scan| parser(move |input| f(is_final_scan, input)))
+        .then(f)
 }
 
 struct DecoderStream<'s, I>(BiteratorStream<'s, I>);

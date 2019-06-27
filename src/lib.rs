@@ -15,7 +15,7 @@ use combine::{
         repeat::{count_min_max, many1, skip_many1},
     },
     stream::{user_state::StateStream, FullRangeStream, PointerOffset, Positioned, StreamErrorFor},
-    Parser,
+    Parser, Stream,
 };
 
 use {
@@ -544,7 +544,7 @@ where
 }
 
 type DecoderStream<'s, I> = StateStream<I, &'s mut Decoder>;
-type BiteratorStream<'a, 's> = StateStream<Biterator<'a>, &'s mut Decoder>;
+type BiteratorStream<'s, I> = StateStream<Biterator<I>, &'s mut Decoder>;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum AdobeColorTransform {
@@ -628,11 +628,16 @@ impl Decoder {
         Ok(image)
     }
 
-    fn decode_scan<'a>(
-        &'a self,
-        input: &mut biterator::Biterator,
+    fn decode_scan<'s, 'a, I>(
+        &'s self,
+        input: &mut biterator::Biterator<I>,
         produce_data: bool,
-    ) -> Result<impl Iterator<Item = Vec<u8>> + 'a> {
+    ) -> Result<impl Iterator<Item = Vec<u8>> + 's>
+    where
+        I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default,
+    {
         let frame = self.frame.as_ref().unwrap();
         let scan = self.scan.as_ref().unwrap();
 
@@ -869,16 +874,21 @@ impl Decoder {
         }))
     }
 
-    fn decode_block(
+    fn decode_block<I>(
         &self,
         coefficients: &mut [i16],
         scan: &Scan,
         dc_table: &huffman::Table,
         ac_table: &huffman::Table,
-        input: &mut biterator::Biterator,
+        input: &mut biterator::Biterator<I>,
         eob_run: &mut u16,
         dc_predictor: &mut i16,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), &'static str>
+    where
+        I: Stream<Item = u8>,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default,
+    {
         if scan.start_of_selection == 0 {
             let value = dc_table
                 .decode(input)

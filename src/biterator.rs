@@ -1,17 +1,18 @@
 use combine::{
     error::UnexpectedParse,
     stream::{PointerOffset, Positioned, ResetStream, StreamErrorFor, StreamOnce},
+    ParseError, Stream,
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct Biterator<'a> {
-    pub(crate) input: &'a [u8],
+pub(crate) struct Biterator<I> {
+    pub(crate) input: I,
     bits: u64,
     count: u8,
 }
 
-impl<'a> Biterator<'a> {
-    pub fn new(input: &'a [u8]) -> Self {
+impl<I> Biterator<I> {
+    pub fn new(input: I) -> Self {
         Biterator {
             input,
             bits: 0,
@@ -19,10 +20,17 @@ impl<'a> Biterator<'a> {
         }
     }
 
-    pub fn into_inner(self) -> &'a [u8] {
+    pub fn into_inner(self) -> I {
         self.input
     }
+}
 
+impl<I> Biterator<I>
+where
+    I: Stream<Item = u8>,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I::Position: Default,
+{
     pub fn count(&self) -> u8 {
         self.count
     }
@@ -63,24 +71,20 @@ impl<'a> Biterator<'a> {
 
     pub fn fill_bits(&mut self) -> Option<()> {
         while self.count <= 56 {
-            if self.input.is_empty() {
-                return None;
-            }
-            let b = match self.input[0] {
-                0xFF if self.input.get(1) == Some(&0x00) => {
-                    self.input = &self.input[2..];
-                    0xFF
-                }
+            let checkpoint = self.checkpoint();
+            let b = match self.input.uncons().ok()? {
                 0xFF => {
-                    while self.count <= 56 {
-                        self.count += 8;
+                    if self.input.uncons().ok() == Some(0x00) {
+                        0xFF
+                    } else {
+                        ResetStream::reset(self, checkpoint).ok()?;
+                        while self.count <= 56 {
+                            self.count += 8;
+                        }
+                        return Some(()); // Not a stuffed 0xFF so we found a marker.
                     }
-                    return Some(()); // Not a stuffed 0xFF so we found a marker.
                 }
-                b => {
-                    self.input = &self.input[1..];
-                    b
-                }
+                b => b,
             };
             self.bits |= u64::from(b) << 56 - self.count;
             self.count += 8;
@@ -98,10 +102,15 @@ pub fn extend(v: u16, t: u8) -> i16 {
     }
 }
 
-impl<'a> StreamOnce for Biterator<'a> {
+impl<I> StreamOnce for Biterator<I>
+where
+    I: Stream<Item = u8>,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I::Position: Default,
+{
     type Item = bool;
     type Range = u16;
-    type Position = PointerOffset<[u8]>;
+    type Position = I::Position;
     type Error = UnexpectedParse;
 
     #[inline]
@@ -112,19 +121,33 @@ impl<'a> StreamOnce for Biterator<'a> {
     }
 }
 
-impl<'a> ResetStream for Biterator<'a> {
-    type Checkpoint = Self;
+impl<I> ResetStream for Biterator<I>
+where
+    I: Stream<Item = u8> + ResetStream,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I::Position: Default,
+{
+    type Checkpoint = (I::Checkpoint, u64, u8);
 
-    fn checkpoint(&self) -> Self {
-        self.clone()
+    fn checkpoint(&self) -> Self::Checkpoint {
+        (self.input.checkpoint(), self.bits, self.count)
     }
-    fn reset(&mut self, checkpoint: Self) -> Result<(), Self::Error> {
-        *self = checkpoint;
+    fn reset(&mut self, checkpoint: Self::Checkpoint) -> Result<(), Self::Error> {
+        self.input
+            .reset(checkpoint.0)
+            .map_err(|_| UnexpectedParse::Unexpected)?;
+        self.bits = checkpoint.1;
+        self.count = checkpoint.2;
         Ok(())
     }
 }
 
-impl<'a> Positioned for Biterator<'a> {
+impl<I> Positioned for Biterator<I>
+where
+    I: Stream<Item = u8> + Positioned,
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I::Position: Default,
+{
     fn position(&self) -> Self::Position {
         self.input.position()
     }

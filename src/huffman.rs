@@ -1,6 +1,7 @@
 use std::iter;
 
 use arrayvec::ArrayVec;
+use combine::{ParseError, Stream};
 
 use crate::biterator::{extend, Biterator};
 
@@ -131,7 +132,12 @@ impl Table {
         Ok(table)
     }
 
-    pub(crate) fn decode(&self, input: &mut Biterator) -> Option<u8> {
+    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Option<u8>
+    where
+        I: Stream<Item = u8>,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default,
+    {
         if input.count() < 16 {
             input.fill_bits();
             if input.count() < LUT_BITS {
@@ -160,7 +166,15 @@ impl Table {
         }
     }
 
-    pub(crate) fn decode_fast_ac(&self, input: &mut Biterator) -> Result<Option<(i16, u8)>, ()> {
+    pub(crate) fn decode_fast_ac<I>(
+        &self,
+        input: &mut Biterator<I>,
+    ) -> Result<Option<(i16, u8)>, ()>
+    where
+        I: Stream<Item = u8>,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default,
+    {
         if let Some(ac_lut) = &self.ac_lut {
             if input.count() < LUT_BITS {
                 input.fill_bits();

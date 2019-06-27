@@ -14,8 +14,11 @@ use combine::{
         range::{range, take},
         repeat::{count_min_max, many1, skip_many1},
     },
-    stream::{user_state::StateStream, FullRangeStream, PointerOffset, Positioned, StreamErrorFor},
-    Parser, Stream,
+    stream::{
+        user_state::StateStream, FullRangeStream, PointerOffset, Positioned, ResetStream,
+        StreamErrorFor,
+    },
+    ParseResult, Parser, RangeStreamOnce, Stream, StreamOnce,
 };
 
 use {
@@ -62,11 +65,9 @@ where
     any().map(|b| (b >> 4, b & 0x0F))
 }
 
-fn segment<'a, 's, I, P, O>(
-    mut parser: P,
-) -> impl Parser<StateStream<I, &'s mut Decoder>, Output = O> + 'a
+fn segment<'a, 's, I, P, O>(mut parser: P) -> impl Parser<DecoderStream<'s, I>, Output = O> + 'a
 where
-    P: Parser<StateStream<I, &'s mut Decoder>, Output = O> + 'a,
+    P: Parser<DecoderStream<'s, I>, Output = O> + 'a,
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + From<&'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
     's: 'a,
@@ -74,12 +75,12 @@ where
     be_u16()
         .then_partial(|&mut len| take(usize::from(len - 2))) // Check len >= 2
         .map_input(
-            move |data, self_: &mut StateStream<I, &'s mut Decoder>| -> Result<_, I::Error> {
-                let before = mem::replace(&mut self_.stream, I::from(data));
+            move |data, self_: &mut DecoderStream<'s, I>| -> Result<_, I::Error> {
+                let before = mem::replace(self_.stream.as_inner_mut(), I::from(data));
 
                 let result = parser.parse_with_state(self_, &mut Default::default());
 
-                self_.stream = before;
+                *self_.stream.as_inner_mut() = before;
 
                 result
             },
@@ -392,7 +393,7 @@ struct ScanHeader {
     ac_table_selector: u8,
 }
 
-fn sos_segment<'a, 's, I>() -> impl Parser<StateStream<I, &'s mut Decoder>, Output = Scan> + 'a
+fn sos_segment<'a, 's, I>() -> impl Parser<DecoderStream<'s, I>, Output = Scan> + 'a
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -408,7 +409,7 @@ where
                 (any(), split_4_bit())
                     .map_input(
                         move |(component_identifier, (dc_table_selector, ac_table_selector)),
-                              self_: &mut StateStream<I, &'s mut Decoder>|
+                              self_: &mut DecoderStream<'s, I>|
                               -> Result<_, StreamErrorFor<I>> {
                             let frame = self_.state.frame.as_ref().ok_or_else(|| {
                                 StreamErrorFor::<I>::message_static_message("Found SOS before SOF")
@@ -472,7 +473,7 @@ where
         )
 }
 
-fn sos<'a, 's, I>() -> impl Parser<StateStream<I, &'s mut Decoder>, Output = ()> + 'a
+fn sos<'a, 's, I>() -> impl Parser<DecoderStream<'s, I>, Output = ()> + 'a
 where
     I: FullRangeStream<
             Item = u8,
@@ -481,44 +482,38 @@ where
         > + From<&'a [u8]>
         + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I::Position: Default,
     's: 'a,
 {
     let f = move |is_final_scan: bool, input: &mut DecoderStream<'s, I>| -> Result<_, _> {
-        let mut biterator = StateStream {
-            stream: Biterator::new(input.range()),
-            state: &mut *input.state,
-        };
-
-        let start = biterator.stream.clone().into_inner();
+        let biterator = &mut input.0;
 
         let result = biterator
             .state
             .decode_scan(&mut biterator.stream, is_final_scan)
+            .map(|iter| iter.collect::<Vec<_>>())
             .map_err(|msg| {
                 Consumed::Consumed(
                     I::Error::from_error(
-                        I::from(biterator.stream.input).position(),
+                        input.position(),
                         StreamErrorFor::<I>::message_message(msg),
                     )
                     .into(),
                 )
-            })
-            .map(|iter| iter.collect::<Vec<_>>());
-
-        input.stream = I::from(biterator.stream.into_inner());
+            });
 
         input.state.planes = result?;
         Ok(((), Consumed::Consumed(())))
     };
     segment(sos_segment())
-        .map_input(move |scan, input: &mut StateStream<I, &'s mut Decoder>| {
+        .map_input(move |scan, input: &mut DecoderStream<'s, I>| {
             input.state.scan = Some(scan);
-            let scan = input.state.scan.as_ref().unwrap();
+            let scan = input.0.state.scan.as_ref().unwrap();
 
             // FIXME Propagate error
-            let frame = input.state.frame.as_ref().ok_or_else(|| {
+            let frame = input.0.state.frame.as_ref().ok_or_else(|| {
                 I::Error::from_error(
-                    input.position(),
+                    input.0.position(),
                     StreamErrorFor::<I>::message_static_message("Found SOS before SOF"),
                 )
             })?;
@@ -529,13 +524,13 @@ where
             if scan.low_approximation == 0 {
                 for i in scan.headers.iter().map(|header| header.component_index) {
                     for j in scan.start_of_selection..=scan.end_of_selection {
-                        input.state.coefficients_finished[usize::from(i)] |= 1 << j;
+                        input.0.state.coefficients_finished[usize::from(i)] |= 1 << j;
                     }
                 }
             }
 
             let is_final_scan = scan.headers.iter().all(|header| {
-                input.state.coefficients_finished[usize::from(header.component_index)] == !0
+                input.0.state.coefficients_finished[usize::from(header.component_index)] == !0
             });
             Ok(is_final_scan)
         })
@@ -543,7 +538,96 @@ where
         .then(move |is_final_scan| parser(move |input| f(is_final_scan, input)))
 }
 
-type DecoderStream<'s, I> = StateStream<I, &'s mut Decoder>;
+struct DecoderStream<'s, I>(BiteratorStream<'s, I>);
+
+impl<'s, I> std::ops::Deref for DecoderStream<'s, I> {
+    type Target = BiteratorStream<'s, I>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'s, I> std::ops::DerefMut for DecoderStream<'s, I> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'s, I> StreamOnce for DecoderStream<'s, I>
+where
+    I: StreamOnce,
+{
+    type Item = I::Item;
+    type Range = I::Range;
+    type Position = I::Position;
+    type Error = I::Error;
+
+    #[inline]
+    fn uncons(&mut self) -> Result<I::Item, StreamErrorFor<Self>> {
+        self.0.stream.as_inner_mut().uncons()
+    }
+}
+
+impl<'s, I> ResetStream for DecoderStream<'s, I>
+where
+    I: ResetStream,
+{
+    type Checkpoint = I::Checkpoint;
+
+    fn checkpoint(&self) -> Self::Checkpoint {
+        self.0.stream.as_inner().checkpoint()
+    }
+
+    fn reset(&mut self, checkpoint: Self::Checkpoint) -> Result<(), Self::Error> {
+        self.0.stream.as_inner_mut().reset(checkpoint)
+    }
+}
+
+impl<'s, I> RangeStreamOnce for DecoderStream<'s, I>
+where
+    I: RangeStreamOnce,
+{
+    fn uncons_range(&mut self, size: usize) -> Result<Self::Range, StreamErrorFor<Self>> {
+        self.stream.as_inner_mut().uncons_range(size)
+    }
+
+    fn uncons_while<F>(&mut self, f: F) -> Result<Self::Range, StreamErrorFor<Self>>
+    where
+        F: FnMut(Self::Item) -> bool,
+    {
+        self.stream.as_inner_mut().uncons_while(f)
+    }
+
+    fn uncons_while1<F>(&mut self, f: F) -> ParseResult<Self::Range, StreamErrorFor<Self>>
+    where
+        F: FnMut(Self::Item) -> bool,
+    {
+        self.stream.as_inner_mut().uncons_while1(f)
+    }
+
+    fn distance(&self, end: &Self::Checkpoint) -> usize {
+        self.stream.as_inner().distance(end)
+    }
+}
+
+impl<'s, I> FullRangeStream for DecoderStream<'s, I>
+where
+    I: FullRangeStream,
+{
+    fn range(&self) -> Self::Range {
+        self.stream.as_inner().range()
+    }
+}
+
+impl<'s, I> Positioned for DecoderStream<'s, I>
+where
+    I: Positioned,
+{
+    fn position(&self) -> Self::Position {
+        self.0.stream.as_inner().position()
+    }
+}
+
 type BiteratorStream<'s, I> = StateStream<Biterator<I>, &'s mut Decoder>;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -591,10 +675,10 @@ impl Decoder {
                 skip_many1(marker().then_partial(move |&mut marker| Self::do_segment(marker)))
                     .skip(eof());
             parser
-                .parse(StateStream {
-                    stream: easy::Stream(input),
+                .parse(DecoderStream(StateStream {
+                    stream: biterator::Biterator::new(easy::Stream(input)),
                     state: self,
-                })
+                }))
                 .map_err(|err| {
                     err.map_position(|pos| pos.translate_position(input))
                         .map_token(|token| format!("0x{:X}", token))
@@ -971,9 +1055,7 @@ impl Decoder {
         Ok(())
     }
 
-    fn do_segment<'a, 's, I>(
-        marker: Marker,
-    ) -> impl Parser<StateStream<I, &'s mut Decoder>, Output = ()> + 'a
+    fn do_segment<'a, 's, I>(marker: Marker) -> impl Parser<DecoderStream<'s, I>, Output = ()> + 'a
     where
         I: FullRangeStream<
                 Item = u8,
@@ -982,15 +1064,16 @@ impl Decoder {
             > + From<&'a [u8]>
             + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default,
         's: 'a,
     {
         log::trace!("Segment {:?}", marker);
 
         dispatch!(marker;
             Marker::SOI | Marker::RST(_) | Marker::COM | Marker::EOI => value(()),
-            Marker::SOF(i) => segment(sof(i)).map_input(move |frame, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.frame = Some(frame)),
+            Marker::SOF(i) => segment(sof(i)).map_input(move |frame, self_: &mut DecoderStream<'s, I>| self_.state.frame = Some(frame)),
             Marker::DHT => {
-                segment(skip_many1(huffman_table().map_input(move |dht, self_: &mut StateStream<I, &'s mut Decoder>| {
+                segment(skip_many1(huffman_table().map_input(move |dht, self_: &mut DecoderStream<'s, I>| {
                     let table =
                         huffman::Table::new(dht.code_lengths, dht.values, dht.table_class)
                             .unwrap(); // FIXME
@@ -1004,15 +1087,15 @@ impl Decoder {
                     }
                 })))
             },
-            Marker::DQT => segment(skip_many1(dqt().map_input(move |dqt, self_: &mut StateStream<I, &'s mut Decoder>| {
+            Marker::DQT => segment(skip_many1(dqt().map_input(move |dqt, self_: &mut DecoderStream<'s, I>| {
                 self_.state.quantization_tables[usize::from(dqt.identifier)] =
                     Some(QuantizationTable::new(&dqt));
             }))),
-            Marker::DRI => segment(dri()).map_input(move |r, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.restart_interval = r),
+            Marker::DRI => segment(dri()).map_input(move |r, self_: &mut DecoderStream<'s, I>| self_.state.restart_interval = r),
             Marker::SOS => sos(),
             Marker::APP_ADOBE => {
                 segment(app_adobe())
-                    .map_input(move |color_transform, self_: &mut StateStream<I, &'s mut Decoder>| self_.state.color_transform = Some(color_transform))
+                    .map_input(move |color_transform, self_: &mut DecoderStream<'s, I>| self_.state.color_transform = Some(color_transform))
             },
             Marker::APP(_) => segment(value(())),
         )

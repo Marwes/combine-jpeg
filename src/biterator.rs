@@ -1,6 +1,6 @@
 use combine::{
     error::UnexpectedParse,
-    stream::{PointerOffset, Positioned, ResetStream, StreamErrorFor, StreamOnce},
+    stream::{Positioned, ResetStream, StreamErrorFor, StreamOnce},
     ParseError, Stream,
 };
 
@@ -22,6 +22,14 @@ impl<I> Biterator<I> {
 
     pub fn into_inner(self) -> I {
         self.input
+    }
+
+    pub fn as_inner(&self) -> &I {
+        &self.input
+    }
+
+    pub fn as_inner_mut(&mut self) -> &mut I {
+        &mut self.input
     }
 }
 

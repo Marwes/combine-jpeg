@@ -1,5 +1,6 @@
 use combine::{
-    error::UnexpectedParse,
+    easy,
+    error::StreamError,
     stream::{Positioned, ResetStream, StreamErrorFor, StreamOnce},
     ParseError, Stream,
 };
@@ -119,13 +120,13 @@ where
     type Item = bool;
     type Range = u16;
     type Position = I::Position;
-    type Error = UnexpectedParse;
+    type Error = easy::Errors<bool, u16, I::Position>;
 
     #[inline]
     fn uncons(&mut self) -> Result<bool, StreamErrorFor<Self>> {
         self.next_bits(1)
             .map(|i| i != 0)
-            .ok_or(UnexpectedParse::Eoi)
+            .ok_or_else(|| StreamErrorFor::<Self>::end_of_input())
     }
 }
 
@@ -141,9 +142,12 @@ where
         (self.input.checkpoint(), self.bits, self.count)
     }
     fn reset(&mut self, checkpoint: Self::Checkpoint) -> Result<(), Self::Error> {
-        self.input
-            .reset(checkpoint.0)
-            .map_err(|_| UnexpectedParse::Unexpected)?;
+        self.input.reset(checkpoint.0).map_err(|_| {
+            Self::Error::from_error(
+                self.position(),
+                StreamErrorFor::<Self>::message_static_message("Unable to reset"),
+            )
+        })?;
         self.bits = checkpoint.1;
         self.count = checkpoint.2;
         Ok(())

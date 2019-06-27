@@ -1,4 +1,4 @@
-use std::mem;
+use std::{fmt, mem};
 
 use arrayvec::ArrayVec;
 
@@ -12,7 +12,7 @@ use combine::{
         byte::num::be_u16,
         item::{any, eof, satisfy_map, value},
         range::{range, take},
-        repeat::{count_min_max, many1, skip_many1},
+        repeat::{count_min_max, iterate, skip_many1},
         ParseMode,
     },
     stream::{
@@ -481,7 +481,7 @@ impl<'s, 'a, Input, P, O, S> Parser<DecoderStream<'s, Input>> for InputConverter
 where
     Input: FullRangeStream<Item = u8, Range = &'a [u8]>,
     Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
-    Input::Position: Default,
+    Input::Position: Default + fmt::Display,
     P: Parser<BiteratorStream<'s, Input>, Output = O, PartialState = S>,
     S: Default,
 {
@@ -504,7 +504,7 @@ where
             .map_err(|err| {
                 Input::Error::from_error(
                     input.position(),
-                    StreamErrorFor::<Input>::message_message(err),
+                    StreamErrorFor::<Input>::message_message(err), // FIXME
                 )
             })
     }
@@ -519,25 +519,9 @@ where
         > + From<&'a [u8]>
         + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
-    I::Position: Default,
+    I::Position: Default + fmt::Display,
     's: 'a,
 {
-    let f = move |is_final_scan: bool| InputConverter {
-        parser: parser(
-            move |biterator: &mut BiteratorStream<'s, I>| -> Result<_, _> {
-                let result = biterator
-                    .state
-                    .decode_scan(&mut biterator.stream, is_final_scan)
-                    .map(|iter| iter.collect::<Vec<_>>())
-                    .map_err(|msg| {
-                        Consumed::Consumed(combine::error::UnexpectedParse::Unexpected.into())
-                    });
-
-                biterator.state.planes = result?;
-                Ok(((), Consumed::Consumed(())))
-            },
-        ),
-    };
     segment(sos_segment())
         .map_input(move |scan, input: &mut DecoderStream<'s, I>| {
             input.state.scan = Some(scan);
@@ -568,10 +552,19 @@ where
             Ok(is_final_scan)
         })
         .flat_map(move |data| -> Result<_, I::Error> { data })
-        .then(f)
+        .then(move |is_final_scan: bool| InputConverter {
+            parser: Decoder::decode_scan(is_final_scan)
+                .map_input(|iter, input| input.state.planes = iter),
+        })
 }
 
+#[repr(transparent)]
 struct DecoderStream<'s, I>(BiteratorStream<'s, I>);
+
+fn decoder_stream<'s, 't, I>(s: &'t mut BiteratorStream<'s, I>) -> &'t mut DecoderStream<'s, I> {
+    // SAFETY repr(transparent) is defined on `DecoderStream`
+    unsafe { mem::transmute(s) }
+}
 
 impl<'s, I> std::ops::Deref for DecoderStream<'s, I> {
     type Target = BiteratorStream<'s, I>;
@@ -699,6 +692,36 @@ pub struct Decoder {
     color_transform: Option<AdobeColorTransform>,
     restart_interval: u16,
     coefficients_finished: [u64; MAX_COMPONENTS],
+
+    scan_state: ScanState,
+}
+
+struct ScanState {
+    mcu_row_coefficients: Vec<Vec<i16>>,
+    dummy_block: [i16; 64],
+    dc_predictors: [i16; 4],
+    eob_run: u16,
+    expected_rst_num: u8,
+    mcus_left_until_restart: u16,
+    is_interleaved: bool,
+    results: [Vec<u8>; 4],
+    offsets: [usize; 256],
+}
+
+impl Default for ScanState {
+    fn default() -> Self {
+        ScanState {
+            mcu_row_coefficients: vec![],
+            dummy_block: [0; 64],
+            dc_predictors: [0; 4],
+            eob_run: 0,
+            expected_rst_num: 0,
+            mcus_left_until_restart: 0,
+            is_interleaved: false,
+            results: Default::default(),
+            offsets: [0; 256],
+        }
+    }
 }
 
 impl Decoder {
@@ -746,253 +769,397 @@ impl Decoder {
     }
 
     fn decode_scan<'s, 'a, I>(
-        &'s self,
-        input: &mut biterator::Biterator<I>,
         produce_data: bool,
-    ) -> Result<impl Iterator<Item = Vec<u8>> + 's>
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = Vec<Vec<u8>>>
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
-        I::Position: Default,
+        I::Position: Default + fmt::Display,
+        's: 'a,
     {
-        let frame = self.frame.as_ref().unwrap();
-        let scan = self.scan.as_ref().unwrap();
+        parser(move |input: &mut BiteratorStream<'s, I>| {
+            let frame = input.state.frame.as_ref().unwrap();
+            let scan = input.state.scan.as_ref().unwrap();
 
-        if scan.start_of_selection == 0
-            && scan.headers.iter().any(|header| {
-                self.dc_huffman_tables[usize::from(header.dc_table_selector)].is_none()
-            })
-        {
-            return Err("scan uses unset dc huffman table".into());
-        }
+            if scan.start_of_selection == 0
+                && scan.headers.iter().any(|header| {
+                    input.state.dc_huffman_tables[usize::from(header.dc_table_selector)].is_none()
+                })
+            {
+                return Err(Consumed::Consumed(
+                    <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                        input.position(),
+                        StreamErrorFor::<BiteratorStream<I>>::message_static_message(
+                            "scan uses unset dc huffman table",
+                        ),
+                    )
+                    .into(),
+                ));
+            }
 
-        if scan.end_of_selection > 1
-            && scan.headers.iter().any(|header| {
-                self.ac_huffman_tables[usize::from(header.ac_table_selector)].is_none()
-            })
-        {
-            return Err("scan uses unset ac huffman table".into());
-        }
+            if scan.end_of_selection > 1
+                && scan.headers.iter().any(|header| {
+                    input.state.ac_huffman_tables[usize::from(header.ac_table_selector)].is_none()
+                })
+            {
+                return Err(Consumed::Consumed(
+                    <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                        input.position(),
+                        StreamErrorFor::<BiteratorStream<I>>::message_static_message(
+                            "scan uses unset ac huffman table",
+                        ),
+                    )
+                    .into(),
+                ));
+            }
 
-        let mut mcu_row_coefficients: Vec<_> =
-            if produce_data && frame.coding_process() != CodingProcess::Progressive {
-                frame
-                    .components
-                    .iter()
-                    .map(|component| {
-                        vec![
-                            0i16;
-                            usize::from(component.block_size.width)
-                                * usize::from(component.vertical_sampling_factor)
-                                * 64
-                        ]
-                    })
-                    .collect()
-            } else {
-                Vec::new()
+            let mcu_row_coefficients: Vec<_> =
+                if produce_data && frame.coding_process() != CodingProcess::Progressive {
+                    frame
+                        .components
+                        .iter()
+                        .map(|component| {
+                            vec![
+                                0i16;
+                                usize::from(component.block_size.width)
+                                    * usize::from(component.vertical_sampling_factor)
+                                    * 64
+                            ]
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+            input.state.scan_state = ScanState {
+                dummy_block: [0i16; 64],
+                dc_predictors: [0i16; 4],
+                eob_run: 0,
+                expected_rst_num: 0,
+                mcus_left_until_restart: input.state.restart_interval,
+                is_interleaved: frame.components.len() > 1,
+                mcu_row_coefficients,
+                results: Default::default(),
+                offsets: [0; 256],
             };
 
-        let mut dummy_block = [0i16; 64];
-        let mut dc_predictors = [0i16; 4];
-        let mut eob_run = 0;
-        let mut expected_rst_num = 0;
-        let mut mcus_left_until_restart = self.restart_interval;
-        let is_interleaved = frame.components.len() > 1;
-
-        let mut results: [Vec<_>; 4] = Default::default();
-
-        if produce_data {
-            for (component, result) in frame.components.iter().zip(&mut results[..]) {
-                let size = usize::from(component.block_size.width)
-                    * usize::from(component.block_size.height)
-                    * 64;
-                result.resize(size, 0u8);
-            }
-        }
-
-        let mut offsets = [0; 256];
-
-        for mcu_y in 0..frame.mcu_size.height {
-            for mcu_x in 0..frame.mcu_size.width {
-                for (((component, dc_predictor), scan_header), mcu_row_coefficient) in frame
+            if produce_data {
+                for (component, result) in frame
                     .components
                     .iter()
-                    .zip(&mut dc_predictors)
-                    .zip(&scan.headers)
-                    .zip(&mut mcu_row_coefficients)
+                    .zip(&mut input.state.scan_state.results[..])
                 {
-                    let blocks_per_mcu = u16::from(component.horizontal_sampling_factor)
-                        * u16::from(component.vertical_sampling_factor);
-                    for j in 0..u16::from(blocks_per_mcu) {
-                        let (block_x, block_y);
+                    let size = usize::from(component.block_size.width)
+                        * usize::from(component.block_size.height)
+                        * 64;
+                    result.resize(size, 0u8);
+                }
+            }
 
-                        if is_interleaved {
-                            block_x = mcu_x * u16::from(component.horizontal_sampling_factor)
-                                + j % u16::from(component.horizontal_sampling_factor);
-                            block_y = mcu_y * u16::from(component.vertical_sampling_factor)
-                                + j / u16::from(component.horizontal_sampling_factor);
-                        } else {
-                            let blocks_per_row = usize::from(component.block_size.width);
-                            let block_num = usize::from(
-                                (mcu_y * frame.mcu_size.width + mcu_x * blocks_per_mcu) + j,
-                            );
+            Ok(((), Consumed::Empty(())))
+        })
+        .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
+            Self::iteration_decode_scanner(produce_data, input)
+        })
+        .then(|parser| parser)
+        .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
+            let results = &mut input.state.scan_state.results;
+            input
+                .state
+                .scan
+                .as_ref()
+                .unwrap()
+                .headers
+                .iter()
+                .map(move |header| {
+                    mem::replace(
+                        &mut results[usize::from(header.component_index)],
+                        Default::default(),
+                    )
+                })
+                .collect()
+        })
+    }
 
-                            block_x = (block_num % blocks_per_row) as u16;
-                            block_y = (block_num / blocks_per_row) as u16;
+    fn iteration_decode_scanner<'a, 's, I>(
+        produce_data: bool,
+        input: &mut BiteratorStream<'s, I>,
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()>
+    where
+        I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default + fmt::Display,
+        's: 'a,
+    {
+        let frame = input.state.frame.as_ref().unwrap();
 
-                            if block_x * 8 >= component.size.width
-                                || block_y * 8 >= component.size.height
-                            {
-                                continue;
-                            }
-                        }
+        let mcu_width = frame.mcu_size.width;
+        let components_len = frame.components.len();
+        iterate::<(), _, _, _, _>(0..frame.mcu_size.height, move |&mcu_y, _| {
+            iterate::<(), _, _, _, _>(0..mcu_width, move |&mcu_x, _| {
+                (
+                    iterate::<(), _, _, _, _>(
+                        0..components_len,
+                        move |&i, input: &mut BiteratorStream<'s, I>| {
+                            let frame = input.state.frame.as_ref().unwrap();
 
-                        let block_offset = (usize::from(block_y)
-                            * usize::from(component.block_size.width)
-                            + usize::from(block_x))
+                            let component = &frame.components[i];
+                            let blocks_per_mcu = u16::from(component.horizontal_sampling_factor)
+                                * u16::from(component.vertical_sampling_factor);
+                            iterate::<(), _, _, _, _>(0..u16::from(blocks_per_mcu), move |&j, _| {
+                                Self::decode_block_parser(
+                                    mcu_x,
+                                    mcu_y,
+                                    i,
+                                    j,
+                                    blocks_per_mcu,
+                                    produce_data,
+                                )
+                            })
+                        },
+                    ),
+                    Self::restart_parser(mcu_x, mcu_y),
+                )
+                    .map(|_| ())
+            })
+            .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
+                if produce_data {
+                    let frame = input.state.frame.as_ref().unwrap();
+
+                    for (component_index, component) in frame.components.iter().enumerate() {
+                        let coefficients_per_mcu_row = component.block_size.width as usize
+                            * component.vertical_sampling_factor as usize
                             * 64;
-                        let mcu_row_offset = usize::from(mcu_y)
-                            * usize::from(component.block_size.width)
-                            * usize::from(component.vertical_sampling_factor)
-                            * 64;
-                        let coefficients = if produce_data {
-                            &mut mcu_row_coefficient
-                                [block_offset - mcu_row_offset..block_offset - mcu_row_offset + 64]
+                        let row_coefficients = if frame.coding_process()
+                            == CodingProcess::Progressive
+                        {
+                            unimplemented!()
                         } else {
-                            &mut dummy_block[..]
+                            mem::replace(
+                                &mut input.state.scan_state.mcu_row_coefficients[component_index],
+                                vec![0; coefficients_per_mcu_row],
+                            )
                         };
 
-                        let dc_table = self.dc_huffman_tables
-                            [usize::from(scan_header.dc_table_selector)]
-                        .as_ref()
-                        .unwrap_or_else(|| panic!("Missing DC table")); // TODO un-unwrap
-                        let ac_table = self.ac_huffman_tables
-                            [usize::from(scan_header.ac_table_selector)]
-                        .as_ref()
-                        .unwrap_or_else(|| panic!("Missing AC table")); // TODO un-unwrap
+                        // Convert coefficients from a MCU row to samples.
+                        let data = row_coefficients;
+                        let offset = input.state.scan_state.offsets[component_index];
 
-                        if scan.high_approximation == 0 {
-                            self.decode_block(
-                                coefficients,
-                                scan,
-                                &dc_table,
-                                &ac_table,
-                                input,
-                                &mut eob_run,
-                                dc_predictor,
-                            )?;
-                        } else {
-                            unimplemented!()
+                        let quantization_table = input.state.quantization_tables
+                            [usize::from(component.quantization_table_destination_selector)]
+                        .as_ref()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Missing quantization table {}",
+                                component.quantization_table_destination_selector
+                            )
+                        });
+
+                        let block_count = usize::from(component.block_size.width)
+                            * usize::from(component.vertical_sampling_factor);
+                        let line_stride = usize::from(component.block_size.width) * 8;
+
+                        assert_eq!(data.len(), block_count * 64);
+
+                        let component_result = &mut input.state.scan_state.results[component_index];
+                        for i in 0..block_count {
+                            let x = (i % usize::from(component.block_size.width)) * 8;
+                            let y = (i / usize::from(component.block_size.width)) * 8;
+                            idct::dequantize_and_idct_block(
+                                &data[i * 64..(i + 1) * 64],
+                                &quantization_table.0,
+                                line_stride,
+                                &mut component_result[offset + y * line_stride + x..],
+                            );
                         }
+
+                        input.state.scan_state.offsets[component_index] += data.len();
                     }
                 }
+            })
+        })
+    }
 
-                if self.restart_interval > 0 {
-                    let is_last_mcu =
-                        mcu_x == frame.mcu_size.width - 1 && mcu_y == frame.mcu_size.height - 1;
-                    mcus_left_until_restart -= 1;
+    fn restart_parser<'s, 'a, I>(
+        mcu_x: u16,
+        mcu_y: u16,
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()>
+    where
+        I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default + fmt::Display,
+        's: 'a,
+    {
+        parser(move |input: &mut BiteratorStream<'s, I>| {
+            if input.state.restart_interval > 0 {
+                let frame = input.state.frame.as_ref().unwrap();
+                let is_last_mcu =
+                    mcu_x == frame.mcu_size.width - 1 && mcu_y == frame.mcu_size.height - 1;
+                input.state.scan_state.mcus_left_until_restart -= 1;
 
-                    if mcus_left_until_restart == 0 && !is_last_mcu {
-                        match marker()
-                            .parse_stream(&mut input.input)
-                            .into_result()
-                            .map(|(marker, _)| marker)
-                        {
-                            Ok(Marker::RST(n)) => {
-                                if n != expected_rst_num {
-                                    return Err(Error::Format(format!(
-                                        "found RST{} where RST{} was expected",
-                                        n, expected_rst_num
-                                    )));
-                                }
-
-                                input.reset();
-
-                                // Section F.2.1.3.1
-                                dc_predictors = [0i16; MAX_COMPONENTS];
-                                // Section G.1.2.2
-                                eob_run = 0;
-
-                                expected_rst_num = (expected_rst_num + 1) % 8;
-                                mcus_left_until_restart = self.restart_interval;
+                if input.state.scan_state.mcus_left_until_restart == 0 && !is_last_mcu {
+                    match marker()
+                        .parse_stream(decoder_stream(input))
+                        .into_result()
+                        .map(|(marker, _)| marker)
+                    {
+                        Ok(Marker::RST(n)) => {
+                            if n != input.state.scan_state.expected_rst_num {
+                                return Err(Consumed::Consumed(
+                                    <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                                        input.position(),
+                                        StreamErrorFor::<BiteratorStream<I>>::message_message(
+                                            format_args!(
+                                                "found RST{} where RST{} was expected",
+                                                n, input.state.scan_state.expected_rst_num
+                                            ),
+                                        ),
+                                    )
+                                    .into(),
+                                ));
                             }
-                            Ok(marker) => {
-                                return Err(Error::Format(format!(
-                                    "found marker {:?} inside scan where RST({}) was expected",
-                                    marker, expected_rst_num
-                                )))
-                            }
-                            Err(_) => {
-                                return Err(Error::Format(format!(
-                                    "no marker found where RST{} was expected",
-                                    expected_rst_num
-                                )))
-                            }
+
+                            input.stream.reset();
+
+                            // Section F.2.1.3.1
+                            input.state.scan_state.dc_predictors = [0i16; MAX_COMPONENTS];
+                            // Section G.1.2.2
+                            input.state.scan_state.eob_run = 0;
+
+                            input.state.scan_state.expected_rst_num =
+                                (input.state.scan_state.expected_rst_num + 1) % 8;
+                            input.state.scan_state.mcus_left_until_restart =
+                                input.state.restart_interval;
+                        }
+                        Ok(marker) => {
+                            return Err(Consumed::Consumed(
+                                                <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                                                    input.position(),
+                                                    StreamErrorFor::<BiteratorStream<I>>::message_message(
+                                                                        format_args!(
+                                                                            "found marker {:?} inside scan where RST({}) was expected",
+                                                                            marker,
+                                                                            input.state.scan_state.expected_rst_num
+                                                                        )
+                                                                    )
+                                                        )
+                                                .into()
+                                                    )
+                                            );
+                        }
+                        Err(_) => {
+                            return Err(Consumed::Consumed(
+                                <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                                    input.position(),
+                                    StreamErrorFor::<BiteratorStream<I>>::message_message(
+                                        format_args!(
+                                            "no marker found where RST{} was expected",
+                                            input.state.scan_state.expected_rst_num
+                                        ),
+                                    ),
+                                )
+                                .into(),
+                            ));
                         }
                     }
                 }
             }
+            Ok(((), Consumed::Empty(())))
+        })
+    }
 
-            if produce_data {
-                for (component_index, component) in frame.components.iter().enumerate() {
-                    let coefficients_per_mcu_row = component.block_size.width as usize
-                        * component.vertical_sampling_factor as usize
-                        * 64;
-                    let row_coefficients = if frame.coding_process() == CodingProcess::Progressive {
-                        unimplemented!()
-                    } else {
-                        mem::replace(
-                            &mut mcu_row_coefficients[component_index],
-                            vec![0; coefficients_per_mcu_row],
-                        )
-                    };
+    fn decode_block_parser<'s, 'a, I>(
+        mcu_x: u16,
+        mcu_y: u16,
+        i: usize,
+        j: u16,
+        blocks_per_mcu: u16,
+        produce_data: bool,
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()>
+    where
+        I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default + fmt::Display,
+        's: 'a,
+    {
+        parser(move |input: &mut BiteratorStream<'s, I>| {
+            let frame = input.state.frame.as_ref().unwrap();
+            let scan = input.state.scan.as_ref().unwrap();
 
-                    // Convert coefficients from a MCU row to samples.
-                    let data = row_coefficients;
-                    let offset = offsets[component_index];
+            let component = &frame.components[i];
+            let dc_predictor = &mut input.state.scan_state.dc_predictors[i];
+            let scan_header = &scan.headers[i];
 
-                    let quantization_table = self.quantization_tables
-                        [usize::from(component.quantization_table_destination_selector)]
-                    .as_ref()
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Missing quantization table {}",
-                            component.quantization_table_destination_selector
-                        )
-                    });
+            let (block_x, block_y);
 
-                    let block_count = usize::from(component.block_size.width)
-                        * usize::from(component.vertical_sampling_factor);
-                    let line_stride = usize::from(component.block_size.width) * 8;
+            if input.state.scan_state.is_interleaved {
+                block_x = mcu_x * u16::from(component.horizontal_sampling_factor)
+                    + j % u16::from(component.horizontal_sampling_factor);
+                block_y = mcu_y * u16::from(component.vertical_sampling_factor)
+                    + j / u16::from(component.horizontal_sampling_factor);
+            } else {
+                let blocks_per_row = usize::from(component.block_size.width);
+                let block_num =
+                    usize::from((mcu_y * frame.mcu_size.width + mcu_x * blocks_per_mcu) + j);
 
-                    assert_eq!(data.len(), block_count * 64);
+                block_x = (block_num % blocks_per_row) as u16;
+                block_y = (block_num / blocks_per_row) as u16;
 
-                    let component_result = &mut results[component_index];
-                    for i in 0..block_count {
-                        let x = (i % usize::from(component.block_size.width)) * 8;
-                        let y = (i / usize::from(component.block_size.width)) * 8;
-                        idct::dequantize_and_idct_block(
-                            &data[i * 64..(i + 1) * 64],
-                            &quantization_table.0,
-                            line_stride,
-                            &mut component_result[offset + y * line_stride + x..],
-                        );
-                    }
-
-                    offsets[component_index] += data.len();
+                if block_x * 8 >= component.size.width || block_y * 8 >= component.size.height {
+                    return Ok(((), Consumed::Empty(())));
                 }
             }
-        }
-        Ok(scan.headers.iter().map(move |header| {
-            mem::replace(
-                &mut results[usize::from(header.component_index)],
-                Default::default(),
-            )
-        }))
+
+            let block_offset = (usize::from(block_y) * usize::from(component.block_size.width)
+                + usize::from(block_x))
+                * 64;
+            let mcu_row_offset = usize::from(mcu_y)
+                * usize::from(component.block_size.width)
+                * usize::from(component.vertical_sampling_factor)
+                * 64;
+            let coefficients = if produce_data {
+                &mut input.state.scan_state.mcu_row_coefficients[i]
+                    [block_offset - mcu_row_offset..block_offset - mcu_row_offset + 64]
+            } else {
+                &mut input.state.scan_state.dummy_block[..]
+            };
+
+            let dc_table = input.state.dc_huffman_tables
+                [usize::from(scan_header.dc_table_selector)]
+            .as_ref()
+            .unwrap_or_else(|| panic!("Missing DC table")); // TODO un-unwrap
+            let ac_table = input.state.ac_huffman_tables
+                [usize::from(scan_header.ac_table_selector)]
+            .as_ref()
+            .unwrap_or_else(|| panic!("Missing AC table")); // TODO un-unwrap
+
+            if scan.high_approximation == 0 {
+                Self::decode_block(
+                    coefficients,
+                    scan,
+                    &dc_table,
+                    &ac_table,
+                    &mut input.stream,
+                    &mut input.state.scan_state.eob_run,
+                    dc_predictor,
+                )
+                .map(|()| ((), Consumed::Consumed(())))
+                .map_err(|msg| {
+                    Consumed::Consumed(
+                        <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                            input.position(),
+                            StreamErrorFor::<BiteratorStream<I>>::message_static_message(msg),
+                        )
+                        .into(),
+                    )
+                })
+            } else {
+                unimplemented!()
+            }
+        })
     }
 
     fn decode_block<I>(
-        &self,
         coefficients: &mut [i16],
         scan: &Scan,
         dc_table: &huffman::Table,
@@ -1097,7 +1264,7 @@ impl Decoder {
             > + From<&'a [u8]>
             + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
-        I::Position: Default,
+        I::Position: Default + fmt::Display,
         's: 'a,
     {
         log::trace!("Segment {:?}", marker);

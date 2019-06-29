@@ -30,38 +30,29 @@ pub(crate) fn choose_color_convert_func(
 fn color_convert_line_null(_data: &mut [u8], _width: usize) {}
 
 fn color_convert_line_ycbcr(data: &mut [u8], width: usize) {
-    for i in 0..width {
-        let (r, g, b) = ycbcr_to_rgb(data[i * 3], data[i * 3 + 1], data[i * 3 + 2]);
-
-        data[i * 3] = r;
-        data[i * 3 + 1] = g;
-        data[i * 3 + 2] = b;
-    }
+    data.chunks_mut(3).take(width).for_each(|chunk| {
+        let converted = ycbcr_to_rgb(chunk[0], chunk[1], chunk[2]);
+        chunk.copy_from_slice(&converted);
+    })
 }
 
 fn color_convert_line_ycck(data: &mut [u8], width: usize) {
-    for i in 0..width {
-        let (r, g, b) = ycbcr_to_rgb(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
-        let k = data[i * 4 + 3];
+    for chunk in data.chunks_mut(4).take(width) {
+        let [r, g, b] = ycbcr_to_rgb(chunk[0], chunk[1], chunk[2]);
+        let k = chunk[3];
 
-        data[i * 4] = r;
-        data[i * 4 + 1] = g;
-        data[i * 4 + 2] = b;
-        data[i * 4 + 3] = 255 - k;
+        chunk.copy_from_slice(&[r, g, b, 255 - k]);
     }
 }
 
-fn color_convert_line_cmyk(data: &mut [u8], width: usize) {
-    for i in 0..width {
-        data[i * 4] = 255 - data[i * 4];
-        data[i * 4 + 1] = 255 - data[i * 4 + 1];
-        data[i * 4 + 2] = 255 - data[i * 4 + 2];
-        data[i * 4 + 3] = 255 - data[i * 4 + 3];
+fn color_convert_line_cmyk(data: &mut [u8], _width: usize) {
+    for d in data {
+        *d = 255 - *d;
     }
 }
 
 // ITU-R BT.601
-fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
+fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
     let y = y as f32;
     let cb = cb as f32 - 128.0;
     let cr = cr as f32 - 128.0;
@@ -70,11 +61,11 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     let g = y - 0.34414 * cb - 0.71414 * cr;
     let b = y + 1.77200 * cb;
 
-    (
+    [
         clamp((r + 0.5) as i32, 0, 255) as u8,
         clamp((g + 0.5) as i32, 0, 255) as u8,
         clamp((b + 0.5) as i32, 0, 255) as u8,
-    )
+    ]
 }
 
 fn clamp<T: PartialOrd>(value: T, min: T, max: T) -> T {

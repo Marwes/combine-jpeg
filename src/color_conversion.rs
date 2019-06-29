@@ -1,10 +1,14 @@
+use itertools::izip;
+
 use crate::AdobeColorTransform;
+
+pub(crate) type ColorConvertFunc = fn(&mut [u8], &[&[u8]], usize);
 
 pub(crate) fn choose_color_convert_func(
     component_count: usize,
     _is_jfif: bool,
     color_transform: Option<AdobeColorTransform>,
-) -> Result<fn(&mut [u8], usize), &'static str> {
+) -> Result<ColorConvertFunc, &'static str> {
     match component_count {
         3 => {
             // http://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
@@ -27,25 +31,31 @@ pub(crate) fn choose_color_convert_func(
     }
 }
 
-fn color_convert_line_null(_data: &mut [u8], _width: usize) {}
+fn color_convert_line_null(_data: &mut [u8], _input: &[&[u8]], _width: usize) {}
 
-fn color_convert_line_ycbcr(data: &mut [u8], width: usize) {
-    data.chunks_exact_mut(3).take(width).for_each(|chunk| {
-        let chunk = fixed_slice_mut!(chunk; 3);
+fn color_convert_line_ycbcr(data: &mut [u8], input: &[&[u8]], width: usize) {
+    let [y, cb, cr] = *fixed_slice!(input; 3);
 
-        let converted = ycbcr_to_rgb(chunk[0], chunk[1], chunk[2]);
+    izip!(data.chunks_exact_mut(3), y, cb, cr)
+        .take(width)
+        .for_each(|(chunk, &y, &cb, &cr)| {
+            let chunk = fixed_slice_mut!(chunk; 3);
 
-        chunk[0] = converted[0];
-        chunk[1] = converted[1];
-        chunk[2] = converted[2];
-    })
+            let converted = ycbcr_to_rgb(y, cb, cr);
+
+            chunk[0] = converted[0];
+            chunk[1] = converted[1];
+            chunk[2] = converted[2];
+        })
 }
 
-fn color_convert_line_ycck(data: &mut [u8], width: usize) {
-    for chunk in data.chunks_exact_mut(4).take(width) {
+fn color_convert_line_ycck(data: &mut [u8], input: &[&[u8]], _width: usize) {
+    let [y, cb, cr] = *fixed_slice!(input; 3);
+
+    for (chunk, &y, &cb, &cr) in izip!(data.chunks_exact_mut(4), y, cb, cr) {
         let chunk = fixed_slice_mut!(chunk; 4);
 
-        let [r, g, b] = ycbcr_to_rgb(chunk[0], chunk[1], chunk[2]);
+        let [r, g, b] = ycbcr_to_rgb(y, cb, cr);
         let k = chunk[3];
 
         chunk[0] = r;
@@ -55,9 +65,15 @@ fn color_convert_line_ycck(data: &mut [u8], width: usize) {
     }
 }
 
-fn color_convert_line_cmyk(data: &mut [u8], _width: usize) {
-    for d in data {
-        *d = 255 - *d;
+fn color_convert_line_cmyk(data: &mut [u8], input: &[&[u8]], _width: usize) {
+    let [c, m, y, k] = *fixed_slice!(input; 4);
+
+    for (out, &c, &m, &y, &k) in izip!(data.chunks_exact_mut(4), c, m, y, k) {
+        let out = fixed_slice_mut!(out; 4);
+        out[0] = 255 - c;
+        out[1] = 255 - m;
+        out[2] = 255 - y;
+        out[3] = 255 - k;
     }
 }
 

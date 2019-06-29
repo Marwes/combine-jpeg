@@ -766,14 +766,16 @@ impl Decoder {
             is_jfif,
             self.color_transform,
         )?;
-        let upsampler =
+        let mut upsampler =
             upsampler::Upsampler::new(&frame.components, frame.samples_per_line, frame.lines)?;
         let line_size = width * frame.components.len();
         let mut image = vec![0u8; line_size * height];
 
         for (row, line) in image.chunks_mut(line_size).enumerate() {
-            upsampler.upsample_and_interleave_row(data, row, width, line);
-            color_convert_func(line, width);
+            let mut colors = ArrayVec::<[_; 4]>::new();
+            colors.extend(upsampler.upsample_and_interleave_row(data, row, width));
+
+            color_convert_func(line, &colors, width);
         }
         Ok(image)
     }
@@ -937,9 +939,6 @@ impl Decoder {
                     let frame = input.state.frame.as_ref().unwrap();
 
                     for (component_index, component) in frame.components.iter().enumerate() {
-                        let coefficients_per_mcu_row = component.block_size.width as usize
-                            * component.vertical_sampling_factor as usize
-                            * 64;
                         let row_coefficients =
                             if frame.coding_process() == CodingProcess::Progressive {
                                 unimplemented!()

@@ -10,6 +10,7 @@ struct UpsamplerComponent {
     width: usize,
     height: usize,
     row_stride: usize,
+    line_buffer: Vec<u8>,
 }
 
 impl Upsampler {
@@ -45,6 +46,7 @@ impl Upsampler {
                 width: component.size.width as usize,
                 height: component.size.height as usize,
                 row_stride: component.block_size.width as usize * 8,
+                line_buffer: Vec::new(),
             });
         }
 
@@ -57,33 +59,30 @@ impl Upsampler {
         })
     }
 
-    pub fn upsample_and_interleave_row(
-        &self,
-        component_data: &[Vec<u8>],
+    pub fn upsample_and_interleave_row<'s>(
+        &'s mut self,
+        component_data: &'s [Vec<u8>],
         row: usize,
         output_width: usize,
-        output: &mut [u8],
-    ) {
+    ) -> impl Iterator<Item = &'s [u8]> + 's {
         let component_count = component_data.len();
-        let mut line_buffer = vec![0u8; self.line_buffer_size];
 
         debug_assert_eq!(component_count, self.components.len());
 
-        for (i, component) in self.components.iter().enumerate() {
-            component.upsampler.upsample_row(
-                &component_data[i],
-                component.width,
-                component.height,
-                component.row_stride,
-                row,
-                output_width,
-                &mut line_buffer,
-            );
-            (i..(output_width * component_count + i))
-                .step_by(component_count)
-                .zip(&line_buffer)
-                .for_each(|(x, l)| output[x] = *l)
-        }
+        self.components
+            .iter_mut()
+            .enumerate()
+            .map(move |(i, component)| {
+                component.upsampler.upsample_row(
+                    &component_data[i],
+                    component.width,
+                    component.height,
+                    component.row_stride,
+                    row,
+                    output_width,
+                    &mut component.line_buffer,
+                )
+            })
     }
 }
 
@@ -133,51 +132,53 @@ fn choose_upsampler(
 }
 
 trait Upsample {
-    fn upsample_row(
+    fn upsample_row<'s>(
         &self,
-        input: &[u8],
+        input: &'s [u8],
         input_width: usize,
         input_height: usize,
         row_stride: usize,
         row: usize,
         output_width: usize,
-        output: &mut [u8],
-    );
+        output: &'s mut Vec<u8>,
+    ) -> &'s [u8];
 }
 
 impl Upsample for UpsamplerH1V1 {
-    fn upsample_row(
+    fn upsample_row<'s>(
         &self,
-        input: &[u8],
+        input: &'s [u8],
         _input_width: usize,
         _input_height: usize,
         row_stride: usize,
         row: usize,
         output_width: usize,
-        output: &mut [u8],
-    ) {
+        _output: &'s mut Vec<u8>,
+    ) -> &'s [u8] {
         let input = &input[row * row_stride..];
-        output[..output_width].copy_from_slice(&input[..output_width]);
+        &input[..output_width]
     }
 }
 
 impl Upsample for UpsamplerH2V1 {
-    fn upsample_row(
+    fn upsample_row<'s>(
         &self,
-        input: &[u8],
+        input: &'s [u8],
         input_width: usize,
         _input_height: usize,
         row_stride: usize,
         row: usize,
-        _output_width: usize,
-        output: &mut [u8],
-    ) {
+        output_width: usize,
+        output: &'s mut Vec<u8>,
+    ) -> &'s [u8] {
+        output.resize(output_width, 0);
+
         let input = &input[row * row_stride..];
 
         if input_width == 1 {
             output[0] = input[0];
             output[1] = input[0];
-            return;
+            return output;
         }
 
         output[0] = input[0];
@@ -193,20 +194,24 @@ impl Upsample for UpsamplerH2V1 {
             ((u32::from(input[input_width - 1]) * 3 + u32::from(input[input_width - 2]) + 2) >> 2)
                 as u8;
         output[(input_width - 1) * 2 + 1] = input[input_width - 1];
+
+        output
     }
 }
 
 impl Upsample for UpsamplerH1V2 {
-    fn upsample_row(
+    fn upsample_row<'s>(
         &self,
-        input: &[u8],
+        input: &'s [u8],
         _input_width: usize,
         input_height: usize,
         row_stride: usize,
         row: usize,
         output_width: usize,
-        output: &mut [u8],
-    ) {
+        output: &'s mut Vec<u8>,
+    ) -> &'s [u8] {
+        output.resize(output_width, 0);
+
         debug_assert!(output.len() == output_width); // TODO Remove output_width
 
         let row_near = row as f32 / 2.0;
@@ -220,20 +225,24 @@ impl Upsample for UpsamplerH1V2 {
         for ((out, &near), &far) in output.iter_mut().zip(input_near).zip(input_far) {
             *out = ((3 * u32::from(near) as u32 + u32::from(far) + 2) >> 2) as u8;
         }
+
+        output
     }
 }
 
 impl Upsample for UpsamplerH2V2 {
-    fn upsample_row(
+    fn upsample_row<'s>(
         &self,
-        input: &[u8],
+        input: &'s [u8],
         input_width: usize,
         input_height: usize,
         row_stride: usize,
         row: usize,
-        _output_width: usize,
-        output: &mut [u8],
-    ) {
+        output_width: usize,
+        output: &'s mut Vec<u8>,
+    ) -> &'s [u8] {
+        output.resize(output_width, 0);
+
         let row_near = row as f32 / 2.0;
         // If row_near's fractional is 0.0 we want row_far to be the previous row and if it's 0.5 we
         // want it to be the next row.
@@ -246,7 +255,7 @@ impl Upsample for UpsamplerH2V2 {
             let value = ((3 * u32::from(input_near[0]) + u32::from(input_far[0]) + 2) >> 2) as u8;
             output[0] = value;
             output[1] = value;
-            return;
+            return output;
         }
 
         let mut t1 = 3 * u32::from(input_near[0]) + u32::from(input_far[0]);
@@ -265,21 +274,25 @@ impl Upsample for UpsamplerH2V2 {
         }
 
         output[input_width * 2 - 1] = ((t1 + 2) >> 2) as u8;
+
+        output
     }
 }
 
 impl Upsample for UpsamplerGeneric {
     // Uses nearest neighbor sampling
-    fn upsample_row(
+    fn upsample_row<'s>(
         &self,
-        input: &[u8],
+        input: &'s [u8],
         input_width: usize,
         _input_height: usize,
         row_stride: usize,
         row: usize,
-        _output_width: usize,
-        output: &mut [u8],
-    ) {
+        output_width: usize,
+        output: &'s mut Vec<u8>,
+    ) -> &'s [u8] {
+        output.resize(output_width, 0);
+
         let start = (row / self.vertical_scaling_factor as usize) * row_stride;
         let input = &input[start..(start + input_width)];
         for (out_chunk, val) in output
@@ -290,5 +303,7 @@ impl Upsample for UpsamplerGeneric {
                 *out = *val;
             }
         }
+
+        output
     }
 }

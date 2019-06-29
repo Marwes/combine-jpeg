@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 arrayvec = "0.4"
 bitvec = "0.13"
+itertools = "0.8"
 log = "*"
 combine = { version = "4.0.0-alpha.1", path = "../combine" }
 derive_more = "0.15"

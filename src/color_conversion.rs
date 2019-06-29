@@ -179,14 +179,14 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
     #[inline(always)]
     fn clamp(x: i32) -> u8 {
         let i = (x + 256) as usize;
-        debug_assert!(i < YCBCR_CLAMP.len());
+        debug_assert!(i < CLAMP_TABLE.len());
         // SAFETY Verified by testing all possible `y, cb, cr` combinations
-        unsafe { *YCBCR_CLAMP.get_unchecked(i) }
+        unsafe { *CLAMP_TABLE.get_unchecked(i) }
     }
     [clamp(y + r), clamp(y + g), clamp(y + b)]
 }
 
-const YCBCR_CLAMP: [u8; 256 * 3] = [
+const CLAMP_TABLE: [u8; 256 * 3] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 20
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 40
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 60

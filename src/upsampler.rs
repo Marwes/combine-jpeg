@@ -232,10 +232,10 @@ impl Upsample for UpsamplerH2V2 {
         input_height: usize,
         row_stride: usize,
         row: usize,
-        output_width: usize,
+        _output_width: usize,
         output: &'s mut Vec<u8>,
     ) -> &'s [u8] {
-        output.resize(output_width, 0);
+        output.resize(input_width * 2, 0);
 
         let row_near = row as f32 / 2.0;
         // If row_near's fractional is 0.0 we want row_far to be the previous row and if it's 0.5 we

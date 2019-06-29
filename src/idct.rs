@@ -108,68 +108,67 @@ pub fn dequantize_and_idct_block(
     }
 
     assert!(output_linestride >= 8);
-    for (chunk, output_chunk) in temp
-        .chunks_exact(8)
+    temp.chunks_exact(8)
         .zip(output.chunks_mut(output_linestride))
-    {
-        // no fast case since the first 1D IDCT spread components out
-        let [s0, s1, s2, s3, s4, s5, s6, s7] = *fixed_slice!(chunk; 8);
+        .for_each(|(chunk, output_chunk)| {
+            // no fast case since the first 1D IDCT spread components out
+            let [s0, s1, s2, s3, s4, s5, s6, s7] = *fixed_slice!(chunk; 8);
 
-        let p2 = s2;
-        let p3 = s6;
-        let p1 = (p2 + p3) * stbi_f2f(0.5411961);
-        let t2 = p1 + p3 * stbi_f2f(-1.847759065);
-        let t3 = p1 + p2 * stbi_f2f(0.765366865);
-        let p2 = s0;
-        let p3 = s4;
-        let t0 = stbi_fsh(p2 + p3);
-        let t1 = stbi_fsh(p2 - p3);
-        let x0 = t0 + t3;
-        let x3 = t0 - t3;
-        let x1 = t1 + t2;
-        let x2 = t1 - t2;
-        let t0 = s7;
-        let t1 = s5;
-        let t2 = s3;
-        let t3 = s1;
-        let p3 = t0 + t2;
-        let p4 = t1 + t3;
-        let p1 = t0 + t3;
-        let p2 = t1 + t2;
-        let p5 = (p3 + p4) * stbi_f2f(1.175875602);
-        let t0 = t0 * stbi_f2f(0.298631336);
-        let t1 = t1 * stbi_f2f(2.053119869);
-        let t2 = t2 * stbi_f2f(3.072711026);
-        let t3 = t3 * stbi_f2f(1.501321110);
-        let p1 = p5 + p1 * stbi_f2f(-0.899976223);
-        let p2 = p5 + p2 * stbi_f2f(-2.562915447);
-        let p3 = p3 * stbi_f2f(-1.961570560);
-        let p4 = p4 * stbi_f2f(-0.390180644);
-        let t3 = t3 + p1 + p4;
-        let t2 = t2 + p2 + p3;
-        let t1 = t1 + p2 + p4;
-        let t0 = t0 + p1 + p3;
+            let p2 = s2;
+            let p3 = s6;
+            let p1 = (p2 + p3) * stbi_f2f(0.5411961);
+            let t2 = p1 + p3 * stbi_f2f(-1.847759065);
+            let t3 = p1 + p2 * stbi_f2f(0.765366865);
+            let p2 = s0;
+            let p3 = s4;
+            let t0 = stbi_fsh(p2 + p3);
+            let t1 = stbi_fsh(p2 - p3);
+            let x0 = t0 + t3;
+            let x3 = t0 - t3;
+            let x1 = t1 + t2;
+            let x2 = t1 - t2;
+            let t0 = s7;
+            let t1 = s5;
+            let t2 = s3;
+            let t3 = s1;
+            let p3 = t0 + t2;
+            let p4 = t1 + t3;
+            let p1 = t0 + t3;
+            let p2 = t1 + t2;
+            let p5 = (p3 + p4) * stbi_f2f(1.175875602);
+            let t0 = t0 * stbi_f2f(0.298631336);
+            let t1 = t1 * stbi_f2f(2.053119869);
+            let t2 = t2 * stbi_f2f(3.072711026);
+            let t3 = t3 * stbi_f2f(1.501321110);
+            let p1 = p5 + p1 * stbi_f2f(-0.899976223);
+            let p2 = p5 + p2 * stbi_f2f(-2.562915447);
+            let p3 = p3 * stbi_f2f(-1.961570560);
+            let p4 = p4 * stbi_f2f(-0.390180644);
+            let t3 = t3 + p1 + p4;
+            let t2 = t2 + p2 + p3;
+            let t1 = t1 + p2 + p4;
+            let t0 = t0 + p1 + p3;
 
-        // constants scaled things up by 1<<12, plus we had 1<<2 from first
-        // loop, plus horizontal and vertical each scale by sqrt(8) so together
-        // we've got an extra 1<<3, so 1<<17 total we need to remove.
-        // so we want to round that, which means adding 0.5 * 1<<17,
-        // aka 65536. Also, we'll end up with -128 to 127 that we want
-        // to encode as 0..255 by adding 128, so we'll add that before the shift
-        let x0 = x0 + Wrapping(65536 + (128 << 17));
-        let x1 = x1 + Wrapping(65536 + (128 << 17));
-        let x2 = x2 + Wrapping(65536 + (128 << 17));
-        let x3 = x3 + Wrapping(65536 + (128 << 17));
+            // constants scaled things up by 1<<12, plus we had 1<<2 from first
+            // loop, plus horizontal and vertical each scale by sqrt(8) so together
+            // we've got an extra 1<<3, so 1<<17 total we need to remove.
+            // so we want to round that, which means adding 0.5 * 1<<17,
+            // aka 65536. Also, we'll end up with -128 to 127 that we want
+            // to encode as 0..255 by adding 128, so we'll add that before the shift
+            let x0 = x0 + Wrapping(65536 + (128 << 17));
+            let x1 = x1 + Wrapping(65536 + (128 << 17));
+            let x2 = x2 + Wrapping(65536 + (128 << 17));
+            let x3 = x3 + Wrapping(65536 + (128 << 17));
 
-        output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
-        output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
-        output_chunk[1] = stbi_clamp((x1 + t2) >> 17);
-        output_chunk[6] = stbi_clamp((x1 - t2) >> 17);
-        output_chunk[2] = stbi_clamp((x2 + t1) >> 17);
-        output_chunk[5] = stbi_clamp((x2 - t1) >> 17);
-        output_chunk[3] = stbi_clamp((x3 + t0) >> 17);
-        output_chunk[4] = stbi_clamp((x3 - t0) >> 17);
-    }
+            output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
+            output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
+            output_chunk[1] = stbi_clamp((x1 + t2) >> 17);
+            output_chunk[6] = stbi_clamp((x1 - t2) >> 17);
+            output_chunk[2] = stbi_clamp((x2 + t1) >> 17);
+            output_chunk[5] = stbi_clamp((x2 - t1) >> 17);
+            output_chunk[3] = stbi_clamp((x3 + t0) >> 17);
+            output_chunk[4] = stbi_clamp((x3 - t0) >> 17);
+        });
 }
 
 // take a -128..127 value and stbi__clamp it and convert to 0..255

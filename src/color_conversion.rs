@@ -37,12 +37,13 @@ fn color_convert_line_ycbcr(data: &mut [u8], input: &[&[u8]], width: usize) {
     let [y, cb, cr] = *fixed_slice!(input; 3);
     let l = y.len().min(cb.len()).min(cr.len()).min(width);
 
-    for (chunk, &y, &cb, &cr) in izip!(
+    izip!(
         data.chunks_exact_mut(3).take(width),
         &y[..l],
         &cb[..l],
         &cr[..l]
-    ) {
+    )
+    .for_each(|(chunk, &y, &cb, &cr)| {
         let chunk = fixed_slice_mut!(chunk; 3);
 
         let converted = ycbcr_to_rgb(y, cb, cr);
@@ -50,19 +51,20 @@ fn color_convert_line_ycbcr(data: &mut [u8], input: &[&[u8]], width: usize) {
         chunk[0] = converted[0];
         chunk[1] = converted[1];
         chunk[2] = converted[2];
-    }
+    })
 }
 
 fn color_convert_line_ycck(data: &mut [u8], input: &[&[u8]], width: usize) {
     let [y, cb, cr] = *fixed_slice!(input; 3);
     let l = y.len().min(cb.len()).min(cr.len()).min(width);
 
-    for (chunk, &y, &cb, &cr) in izip!(
+    izip!(
         data.chunks_exact_mut(4).take(width),
         &y[..l],
         &cb[..l],
         &cr[..l]
-    ) {
+    )
+    .for_each(|(chunk, &y, &cb, &cr)| {
         let chunk = fixed_slice_mut!(chunk; 4);
 
         let [r, g, b] = ycbcr_to_rgb(y, cb, cr);
@@ -72,26 +74,27 @@ fn color_convert_line_ycck(data: &mut [u8], input: &[&[u8]], width: usize) {
         chunk[1] = g;
         chunk[2] = b;
         chunk[3] = 255 - k;
-    }
+    })
 }
 
 fn color_convert_line_cmyk(data: &mut [u8], input: &[&[u8]], width: usize) {
     let [c, m, y, k] = *fixed_slice!(input; 4);
     let l = c.len().min(m.len()).min(y.len()).min(k.len()).min(width);
 
-    for (out, &c, &m, &y, &k) in izip!(
+    izip!(
         data.chunks_exact_mut(4).take(width),
         &c[..l],
         &m[..l],
         &y[..l],
         &k[..l]
-    ) {
+    )
+    .for_each(|(out, &c, &m, &y, &k)| {
         let out = fixed_slice_mut!(out; 4);
         out[0] = 255 - c;
         out[1] = 255 - m;
         out[2] = 255 - y;
         out[3] = 255 - k;
-    }
+    })
 }
 
 macro_rules! call_func {

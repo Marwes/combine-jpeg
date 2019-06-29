@@ -24,14 +24,13 @@ pub fn dequantize_and_idct_block(
 
     // columns
     for i in 0..8 {
-        if (coefficients[i + 8]
-            | coefficients[i + 16]
-            | coefficients[i + 24]
-            | coefficients[i + 32]
-            | coefficients[i + 40]
-            | coefficients[i + 48]
-            | coefficients[i + 56])
-            == 0
+        if coefficients[i + 8] == 0
+            && coefficients[i + 16] == 0
+            && coefficients[i + 24] == 0
+            && coefficients[i + 32] == 0
+            && coefficients[i + 40] == 0
+            && coefficients[i + 48] == 0
+            && coefficients[i + 56] == 0
         {
             let dcterm = dequantize(coefficients[i], quantization_table[i]) << 2;
             temp[i] = dcterm;

@@ -965,8 +965,9 @@ impl Decoder {
                         for i in 0..block_count {
                             let x = (i % usize::from(component.block_size.width)) * 8;
                             let y = (i / usize::from(component.block_size.width)) * 8;
+                            let start = i * 64;
                             idct::dequantize_and_idct_block(
-                                &data[i * 64..(i + 1) * 64],
+                                fixed_slice!(&data[start..start + 64]; 64),
                                 &quantization_table.0,
                                 line_stride,
                                 &mut component_result[offset + y * line_stride + x..],

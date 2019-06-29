@@ -8,12 +8,12 @@ use std::num::Wrapping;
 
 // This is based on stb_image's 'stbi__idct_block'.
 pub fn dequantize_and_idct_block(
-    coefficients: &[i16],
+    coefficients: &[i16; 64],
     quantization_table: &[u16; 64],
     output_linestride: usize,
     output: &mut [u8],
 ) {
-    let coefficients = fixed_slice!(coefficients; 64);
+    assert!(output_linestride >= 8);
 
     let mut temp = [Wrapping(0i32); 64];
 
@@ -99,7 +99,11 @@ pub fn dequantize_and_idct_block(
         }
     }
 
-    for (chunk, output_chunk) in temp.chunks(8).zip(output.chunks_mut(output_linestride)) {
+    assert!(output_linestride >= 8);
+    for (chunk, output_chunk) in temp
+        .chunks_exact(8)
+        .zip(output.chunks_mut(output_linestride))
+    {
         // no fast case since the first 1D IDCT spread components out
         let [s0, s1, s2, s3, s4, s5, s6, s7] = *fixed_slice!(chunk; 8);
 

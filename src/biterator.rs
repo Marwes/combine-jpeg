@@ -21,10 +21,6 @@ impl<I> Biterator<I> {
         }
     }
 
-    pub fn into_inner(self) -> I {
-        self.input
-    }
-
     pub fn as_inner(&self) -> &I {
         &self.input
     }

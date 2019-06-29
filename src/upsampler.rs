@@ -2,7 +2,6 @@ use crate::{Component, Error, Result, UnsupportedFeature};
 
 pub(crate) struct Upsampler {
     components: Vec<UpsamplerComponent>,
-    line_buffer_size: usize,
 }
 
 struct UpsamplerComponent {
@@ -49,13 +48,8 @@ impl Upsampler {
                 line_buffer: Vec::new(),
             });
         }
-
-        let buffer_size =
-            components.iter().map(|c| c.size.width).max().unwrap() as usize * h_max as usize;
-
         Ok(Upsampler {
             components: upsampler_components,
-            line_buffer_size: buffer_size,
         })
     }
 

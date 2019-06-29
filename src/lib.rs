@@ -135,10 +135,6 @@ pub struct Frame {
 }
 
 impl Frame {
-    fn is_baseline(&self) -> bool {
-        self.marker_index == 0
-    }
-
     fn coding_process(&self) -> CodingProcess {
         match self.marker_index {
             0 => CodingProcess::Baseline,
@@ -147,10 +143,6 @@ impl Frame {
             3 | 7 | 11 | 15 => CodingProcess::LossLess,
             i => panic!("Unknown SOF marker {}", i),
         }
-    }
-
-    fn component_width(&self, index: usize) -> u16 {
-        self.mcu_size.width * u16::from(self.components[index].horizontal_sampling_factor)
     }
 }
 

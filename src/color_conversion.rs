@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn check_ycbr_convert_safety() {
-        for (y, cb, cr) in iproduct!(0..=255, 0..=255, 0..=255) {
+        for (y, (cb, cr)) in (0..=255).zip(iproduct!(0..=255, 0..=255)) {
             ycbcr_to_rgb(y, cb, cr);
         }
     }

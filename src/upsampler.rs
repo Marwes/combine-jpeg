@@ -79,9 +79,10 @@ impl Upsampler {
                 output_width,
                 &mut line_buffer,
             );
-            for x in 0..output_width {
-                output[x * component_count + i] = line_buffer[x];
-            }
+            (i..(output_width * component_count + i))
+                .step_by(component_count)
+                .zip(&line_buffer)
+                .for_each(|(x, l)| output[x] = *l)
         }
     }
 }
@@ -156,10 +157,7 @@ impl Upsample for UpsamplerH1V1 {
         output: &mut [u8],
     ) {
         let input = &input[row * row_stride..];
-
-        for i in 0..output_width {
-            output[i] = input[i];
-        }
+        output[..output_width].copy_from_slice(&input[..output_width]);
     }
 }
 

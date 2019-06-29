@@ -940,16 +940,12 @@ impl Decoder {
                         let coefficients_per_mcu_row = component.block_size.width as usize
                             * component.vertical_sampling_factor as usize
                             * 64;
-                        let row_coefficients = if frame.coding_process()
-                            == CodingProcess::Progressive
-                        {
-                            unimplemented!()
-                        } else {
-                            mem::replace(
-                                &mut input.state.scan_state.mcu_row_coefficients[component_index],
-                                vec![0; coefficients_per_mcu_row],
-                            )
-                        };
+                        let row_coefficients =
+                            if frame.coding_process() == CodingProcess::Progressive {
+                                unimplemented!()
+                            } else {
+                                &mut input.state.scan_state.mcu_row_coefficients[component_index]
+                            };
 
                         // Convert coefficients from a MCU row to samples.
                         let data = row_coefficients;
@@ -985,6 +981,10 @@ impl Decoder {
                         }
 
                         input.state.scan_state.offsets[component_index] += data.len();
+
+                        for x in data {
+                            *x = 0;
+                        }
                     }
                 }
             })

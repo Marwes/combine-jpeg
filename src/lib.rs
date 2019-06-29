@@ -958,7 +958,8 @@ impl Decoder {
 
                         assert_eq!(data.len(), block_count * 64);
 
-                        let component_result = &mut input.state.scan_state.results[component_index];
+                        let component_result =
+                            &mut input.state.scan_state.results[component_index][offset..];
                         for i in 0..block_count {
                             let x = (i % usize::from(component.block_size.width)) * 8;
                             let y = (i / usize::from(component.block_size.width)) * 8;
@@ -967,7 +968,7 @@ impl Decoder {
                                 fixed_slice!(&data[start..start + 64]; 64),
                                 &quantization_table.0,
                                 line_stride,
-                                &mut component_result[offset + y * line_stride + x..],
+                                &mut component_result[y * line_stride + x..],
                             );
                         }
 

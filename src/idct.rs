@@ -15,20 +15,25 @@ pub fn dequantize_and_idct_block(
 ) {
     assert!(output_linestride >= 8);
 
-    let mut temp = [Wrapping(0i32); 64];
+    #[inline(always)]
+    fn dequantize(c: i16, q: u16) -> Wrapping<i32> {
+        Wrapping(i32::from(c) * i32::from(q))
+    }
+
+    let mut temp: [Wrapping<i32>; 64] = unsafe { std::mem::uninitialized() };
 
     // columns
     for i in 0..8 {
-        if coefficients[i + 8] == 0
-            && coefficients[i + 16] == 0
-            && coefficients[i + 24] == 0
-            && coefficients[i + 32] == 0
-            && coefficients[i + 40] == 0
-            && coefficients[i + 48] == 0
-            && coefficients[i + 56] == 0
+        if (coefficients[i + 8]
+            | coefficients[i + 16]
+            | coefficients[i + 24]
+            | coefficients[i + 32]
+            | coefficients[i + 40]
+            | coefficients[i + 48]
+            | coefficients[i + 56])
+            == 0
         {
-            let dcterm =
-                Wrapping(i32::from(coefficients[i]) * i32::from(quantization_table[i])) << 2;
+            let dcterm = dequantize(coefficients[i], quantization_table[i]) << 2;
             temp[i] = dcterm;
             temp[i + 8] = dcterm;
             temp[i + 16] = dcterm;
@@ -38,21 +43,14 @@ pub fn dequantize_and_idct_block(
             temp[i + 48] = dcterm;
             temp[i + 56] = dcterm;
         } else {
-            let s0 = Wrapping(i32::from(coefficients[i]) * i32::from(quantization_table[i]));
-            let s1 =
-                Wrapping(i32::from(coefficients[i + 8]) * i32::from(quantization_table[i + 8]));
-            let s2 =
-                Wrapping(i32::from(coefficients[i + 16]) * i32::from(quantization_table[i + 16]));
-            let s3 =
-                Wrapping(i32::from(coefficients[i + 24]) * i32::from(quantization_table[i + 24]));
-            let s4 =
-                Wrapping(i32::from(coefficients[i + 32]) * i32::from(quantization_table[i + 32]));
-            let s5 =
-                Wrapping(i32::from(coefficients[i + 40]) * i32::from(quantization_table[i + 40]));
-            let s6 =
-                Wrapping(i32::from(coefficients[i + 48]) * i32::from(quantization_table[i + 48]));
-            let s7 =
-                Wrapping(i32::from(coefficients[i + 56]) * i32::from(quantization_table[i + 56]));
+            let s0 = dequantize(coefficients[i], quantization_table[i]);
+            let s1 = dequantize(coefficients[i + 8], quantization_table[i + 8]);
+            let s2 = dequantize(coefficients[i + 16], quantization_table[i + 16]);
+            let s3 = dequantize(coefficients[i + 24], quantization_table[i + 24]);
+            let s4 = dequantize(coefficients[i + 32], quantization_table[i + 32]);
+            let s5 = dequantize(coefficients[i + 40], quantization_table[i + 40]);
+            let s6 = dequantize(coefficients[i + 48], quantization_table[i + 48]);
+            let s7 = dequantize(coefficients[i + 56], quantization_table[i + 56]);
 
             let p2 = s2;
             let p3 = s6;

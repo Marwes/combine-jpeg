@@ -98,16 +98,9 @@ pub fn dequantize_and_idct_block(
         }
     }
 
-    for i in 0..8 {
+    for (chunk, output_chunk) in temp.chunks(8).zip(output.chunks_mut(output_linestride)) {
         // no fast case since the first 1D IDCT spread components out
-        let s0 = temp[i * 8];
-        let s1 = temp[i * 8 + 1];
-        let s2 = temp[i * 8 + 2];
-        let s3 = temp[i * 8 + 3];
-        let s4 = temp[i * 8 + 4];
-        let s5 = temp[i * 8 + 5];
-        let s6 = temp[i * 8 + 6];
-        let s7 = temp[i * 8 + 7];
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = *fixed_slice!(chunk; 8);
 
         let p2 = s2;
         let p3 = s6;
@@ -155,14 +148,14 @@ pub fn dequantize_and_idct_block(
         let x2 = x2.wrapping_add(65536 + (128 << 17));
         let x3 = x3.wrapping_add(65536 + (128 << 17));
 
-        output[i * output_linestride] = stbi_clamp(x0.wrapping_add(t3).wrapping_shr(17));
-        output[i * output_linestride + 7] = stbi_clamp(x0.wrapping_sub(t3).wrapping_shr(17));
-        output[i * output_linestride + 1] = stbi_clamp(x1.wrapping_add(t2).wrapping_shr(17));
-        output[i * output_linestride + 6] = stbi_clamp(x1.wrapping_sub(t2).wrapping_shr(17));
-        output[i * output_linestride + 2] = stbi_clamp(x2.wrapping_add(t1).wrapping_shr(17));
-        output[i * output_linestride + 5] = stbi_clamp(x2.wrapping_sub(t1).wrapping_shr(17));
-        output[i * output_linestride + 3] = stbi_clamp(x3.wrapping_add(t0).wrapping_shr(17));
-        output[i * output_linestride + 4] = stbi_clamp(x3.wrapping_sub(t0).wrapping_shr(17));
+        output_chunk[0] = stbi_clamp(x0.wrapping_add(t3).wrapping_shr(17));
+        output_chunk[7] = stbi_clamp(x0.wrapping_sub(t3).wrapping_shr(17));
+        output_chunk[1] = stbi_clamp(x1.wrapping_add(t2).wrapping_shr(17));
+        output_chunk[6] = stbi_clamp(x1.wrapping_sub(t2).wrapping_shr(17));
+        output_chunk[2] = stbi_clamp(x2.wrapping_add(t1).wrapping_shr(17));
+        output_chunk[5] = stbi_clamp(x2.wrapping_sub(t1).wrapping_shr(17));
+        output_chunk[3] = stbi_clamp(x3.wrapping_add(t0).wrapping_shr(17));
+        output_chunk[4] = stbi_clamp(x3.wrapping_sub(t0).wrapping_shr(17));
     }
 }
 

@@ -27,6 +27,16 @@ use {
     marker::{marker, Marker},
 };
 
+macro_rules! fixed_slice {
+    ($expr: expr; $len: tt) => {{
+        unsafe fn transmute_array<T>(xs: &[T]) -> &[T; $len] {
+            assert!(xs.len() == $len);
+            &*(xs.as_ptr() as *const [T; $len])
+        }
+        unsafe { transmute_array($expr) }
+    }};
+}
+
 mod biterator;
 mod color_conversion;
 mod huffman;
@@ -226,16 +236,6 @@ where
             })
         },
     )
-}
-
-macro_rules! fixed_slice {
-    ($expr: expr; $len: tt) => {{
-        unsafe fn transmute_array<T>(xs: &[T]) -> &[T; $len] {
-            assert!(xs.len() == $len);
-            &*(xs.as_ptr() as *const [T; $len])
-        }
-        unsafe { transmute_array($expr) }
-    }};
 }
 
 struct DHT<'a> {

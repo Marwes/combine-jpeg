@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use criterion::{criterion_group, criterion_main, Bencher, Benchmark, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Bencher, Benchmark, Criterion};
 
 use combine_jpeg::Decoder;
 
@@ -15,7 +15,7 @@ fn bench_decode_path(b: &mut Bencher, in_path: &Path, name: &str) {
 
     b.iter(|| {
         let mut decoder = Decoder::default();
-        let out = decoder.decode(&input).unwrap();
+        let out = decoder.decode(black_box(&input)).unwrap();
         out
     });
 }
@@ -33,14 +33,12 @@ fn simple(b: &mut Bencher) {
 }
 
 fn it_works_mozjpeg(b: &mut Bencher) {
-    use mozjpeg::CompInfoExt;
-
     let name = "img0.jpg";
     let input = fs::read(Path::new(name))
         .unwrap_or_else(|err| panic!("Can't read image {}: {}", name, err));
 
     b.iter(|| {
-        let decompress = mozjpeg::Decompress::new_mem(&input).unwrap();
+        let decompress = mozjpeg::Decompress::new_mem(black_box(&input)).unwrap();
         let mut started = decompress.rgb().unwrap();
         let out = started.read_scanlines::<[u8; 3]>().unwrap();
         assert!(started.finish_decompress());

@@ -72,34 +72,32 @@ pub fn dequantize_and_idct_block(
         }
     }
 
-    assert!(output_linestride >= 8);
-    temp.chunks_exact(8)
-        .zip(output.chunks_mut(output_linestride))
-        .for_each(|(chunk, output_chunk)| {
-            // no fast case since the first 1D IDCT spread components out
-            let Kernel {
-                xs: [x0, x1, x2, x3],
-                ts: [t0, t1, t2, t3],
-            } = kernel(
-                *fixed_slice!(chunk; 8),
-                // constants scaled things up by 1<<12, plus we had 1<<2 from first
-                // loop, plus horizontal and vertical each scale by sqrt(8) so together
-                // we've got an extra 1<<3, so 1<<17 total we need to remove.
-                // so we want to round that, which means adding 0.5 * 1<<17,
-                // aka 65536. Also, we'll end up with -128 to 127 that we want
-                // to encode as 0..255 by adding 128, so we'll add that before the shift
-                Wrapping(65536 + (128 << 17)),
-            );
+    let output_chunks = output.chunks_mut(output_linestride).take(8);
+    for (chunk, output_chunk) in temp.chunks_exact(8).zip(output_chunks) {
+        // no fast case since the first 1D IDCT spread components out
+        let Kernel {
+            xs: [x0, x1, x2, x3],
+            ts: [t0, t1, t2, t3],
+        } = kernel(
+            *fixed_slice!(chunk; 8),
+            // constants scaled things up by 1<<12, plus we had 1<<2 from first
+            // loop, plus horizontal and vertical each scale by sqrt(8) so together
+            // we've got an extra 1<<3, so 1<<17 total we need to remove.
+            // so we want to round that, which means adding 0.5 * 1<<17,
+            // aka 65536. Also, we'll end up with -128 to 127 that we want
+            // to encode as 0..255 by adding 128, so we'll add that before the shift
+            Wrapping(65536 + (128 << 17)),
+        );
 
-            output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
-            output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
-            output_chunk[1] = stbi_clamp((x1 + t2) >> 17);
-            output_chunk[6] = stbi_clamp((x1 - t2) >> 17);
-            output_chunk[2] = stbi_clamp((x2 + t1) >> 17);
-            output_chunk[5] = stbi_clamp((x2 - t1) >> 17);
-            output_chunk[3] = stbi_clamp((x3 + t0) >> 17);
-            output_chunk[4] = stbi_clamp((x3 - t0) >> 17);
-        });
+        output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
+        output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
+        output_chunk[1] = stbi_clamp((x1 + t2) >> 17);
+        output_chunk[6] = stbi_clamp((x1 - t2) >> 17);
+        output_chunk[2] = stbi_clamp((x2 + t1) >> 17);
+        output_chunk[5] = stbi_clamp((x2 - t1) >> 17);
+        output_chunk[3] = stbi_clamp((x3 + t0) >> 17);
+        output_chunk[4] = stbi_clamp((x3 - t0) >> 17);
+    }
 }
 
 struct Kernel {

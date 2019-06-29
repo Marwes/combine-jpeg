@@ -37,6 +37,16 @@ macro_rules! fixed_slice {
     }};
 }
 
+macro_rules! fixed_slice_mut {
+    ($expr: expr; $len: tt) => {{
+        unsafe fn transmute_array<T>(xs: &mut [T]) -> &mut [T; $len] {
+            assert!(xs.len() == $len);
+            &mut *(xs.as_mut_ptr() as *mut [T; $len])
+        }
+        unsafe { transmute_array($expr) }
+    }};
+}
+
 mod biterator;
 mod color_conversion;
 mod huffman;

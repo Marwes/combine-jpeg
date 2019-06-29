@@ -30,18 +30,28 @@ pub(crate) fn choose_color_convert_func(
 fn color_convert_line_null(_data: &mut [u8], _width: usize) {}
 
 fn color_convert_line_ycbcr(data: &mut [u8], width: usize) {
-    data.chunks_mut(3).take(width).for_each(|chunk| {
+    data.chunks_exact_mut(3).take(width).for_each(|chunk| {
+        let chunk = fixed_slice_mut!(chunk; 3);
+
         let converted = ycbcr_to_rgb(chunk[0], chunk[1], chunk[2]);
-        chunk.copy_from_slice(&converted);
+
+        chunk[0] = converted[0];
+        chunk[1] = converted[1];
+        chunk[2] = converted[2];
     })
 }
 
 fn color_convert_line_ycck(data: &mut [u8], width: usize) {
-    for chunk in data.chunks_mut(4).take(width) {
+    for chunk in data.chunks_exact_mut(4).take(width) {
+        let chunk = fixed_slice_mut!(chunk; 4);
+
         let [r, g, b] = ycbcr_to_rgb(chunk[0], chunk[1], chunk[2]);
         let k = chunk[3];
 
-        chunk.copy_from_slice(&[r, g, b, 255 - k]);
+        chunk[0] = r;
+        chunk[1] = g;
+        chunk[2] = b;
+        chunk[3] = 255 - k;
     }
 }
 

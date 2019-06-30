@@ -70,20 +70,30 @@ pub fn dequantize_and_idct_block<'a>(
     }
 
     for (chunk, output_chunk) in temp.chunks_exact(8).zip(output) {
-        // no fast case since the first 1D IDCT spread components out
+        let chunk = fixed_slice!(chunk; 8);
+
+        // constants scaled things up by 1<<12, plus we had 1<<2 from first
+        // loop, plus horizontal and vertical each scale by sqrt(8) so together
+        // we've got an extra 1<<3, so 1<<17 total we need to remove.
+        // so we want to round that, which means adding 0.5 * 1<<17,
+        // aka 65536. Also, we'll end up with -128 to 127 that we want
+        // to encode as 0..255 by adding 128, so we'll add that before the shift
+        const X_SCALE: Wrapping<i32> = Wrapping(65536 + (128 << 17));
+
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = *chunk;
+        if s1.0 == 0 && s2.0 == 0 && s3.0 == 0 && s4.0 == 0 && s5.0 == 0 && s6.0 == 0 && s7.0 == 0 {
+            let dcterm = stbi_clamp((stbi_fsh(s0) + X_SCALE) >> 17);
+            for x in output_chunk {
+                *x = dcterm;
+            }
+
+            continue;
+        }
+
         let Kernel {
             xs: [x0, x1, x2, x3],
             ts: [t0, t1, t2, t3],
-        } = kernel(
-            *fixed_slice!(chunk; 8),
-            // constants scaled things up by 1<<12, plus we had 1<<2 from first
-            // loop, plus horizontal and vertical each scale by sqrt(8) so together
-            // we've got an extra 1<<3, so 1<<17 total we need to remove.
-            // so we want to round that, which means adding 0.5 * 1<<17,
-            // aka 65536. Also, we'll end up with -128 to 127 that we want
-            // to encode as 0..255 by adding 128, so we'll add that before the shift
-            Wrapping(65536 + (128 << 17)),
-        );
+        } = kernel(*chunk, X_SCALE);
 
         output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
         output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
@@ -169,17 +179,19 @@ fn kernel([s0, s1, s2, s3, s4, s5, s6, s7]: [Wrapping<i32>; 8], x_scale: Wrappin
 
 // take a -128..127 value and stbi__clamp it and convert to 0..255
 fn stbi_clamp(Wrapping(x): Wrapping<i32>) -> u8 {
-    // trick to use a single test to catch both cases
-    if x as u32 > 255 {
-        if x < 0 {
-            return 0;
-        }
-        if x > 255 {
-            return 255;
-        }
-    }
+    use crate::color_conversion::CLAMP_TABLE;
 
-    x as u8
+    const MAX_SAMPLE: i32 = 0b11_1111_1111; // 2 bits wider than legal samples (?)
+
+    let x = ((x + 256) & MAX_SAMPLE) as usize;
+
+    debug_assert!(
+        MAX_SAMPLE as usize + 1 == CLAMP_TABLE.len(),
+        "{} == {}",
+        MAX_SAMPLE + 1,
+        CLAMP_TABLE.len()
+    );
+    unsafe { *CLAMP_TABLE.get_unchecked(x) }
 }
 
 fn stbi_f2f(x: f32) -> Wrapping<i32> {

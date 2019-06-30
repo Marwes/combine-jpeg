@@ -51,7 +51,7 @@ fn decode_group(c: &mut Criterion) {
         "it_works",
         Benchmark::new("combine", it_works)
             .with_function("mozjpeg", it_works_mozjpeg)
-            .sample_size(10),
+            .sample_size(20),
     );
     c.bench_function("green", green);
     c.bench_function("simple", simple);

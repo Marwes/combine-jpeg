@@ -967,8 +967,9 @@ impl Decoder {
                             idct::dequantize_and_idct_block(
                                 fixed_slice!(&data[start..start + 64]; 64),
                                 &quantization_table.0,
-                                line_stride,
-                                &mut component_result[y * line_stride + x..],
+                                component_result[y * line_stride + x..]
+                                    .chunks_mut(line_stride)
+                                    .map(|chunk| fixed_slice_mut!(&mut chunk[..8]; 8)),
                             );
                         }
 
@@ -1121,10 +1122,10 @@ impl Decoder {
                 * usize::from(component.vertical_sampling_factor)
                 * 64;
             let coefficients = if produce_data {
-                &mut input.state.scan_state.mcu_row_coefficients[i]
-                    [block_offset - mcu_row_offset..block_offset - mcu_row_offset + 64]
+                let start = block_offset - mcu_row_offset;
+                fixed_slice_mut!(&mut input.state.scan_state.mcu_row_coefficients[i][start..start + 64]; 64)
             } else {
-                &mut input.state.scan_state.dummy_block[..]
+                &mut input.state.scan_state.dummy_block
             };
 
             let dc_table = input.state.dc_huffman_tables
@@ -1163,7 +1164,7 @@ impl Decoder {
     }
 
     fn decode_block<I>(
-        coefficients: &mut [i16],
+        coefficients: &mut [i16; 64],
         scan: &Scan,
         dc_table: &huffman::Table,
         ac_table: &huffman::Table,

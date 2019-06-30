@@ -7,14 +7,11 @@
 use std::num::Wrapping;
 
 // This is based on stb_image's 'stbi__idct_block'.
-pub fn dequantize_and_idct_block(
+pub fn dequantize_and_idct_block<'a>(
     coefficients: &[i16; 64],
     quantization_table: &[u16; 64],
-    output_linestride: usize,
-    output: &mut [u8],
+    output: impl IntoIterator<Item = &'a mut [u8; 8]>,
 ) {
-    assert!(output_linestride >= 8);
-
     #[inline(always)]
     fn dequantize(c: i16, q: u16) -> Wrapping<i32> {
         Wrapping(i32::from(c) * i32::from(q))
@@ -72,8 +69,7 @@ pub fn dequantize_and_idct_block(
         }
     }
 
-    let output_chunks = output.chunks_mut(output_linestride).take(8);
-    for (chunk, output_chunk) in temp.chunks_exact(8).zip(output_chunks) {
+    for (chunk, output_chunk) in temp.chunks_exact(8).zip(output) {
         // no fast case since the first 1D IDCT spread components out
         let Kernel {
             xs: [x0, x1, x2, x3],

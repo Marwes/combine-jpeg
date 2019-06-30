@@ -6,6 +6,8 @@
 
 use std::num::Wrapping;
 
+use crate::clamp::stbi_clamp;
+
 // This is based on stb_image's 'stbi__idct_block'.
 pub fn dequantize_and_idct_block<'a>(
     coefficients: &[i16; 64],
@@ -175,23 +177,6 @@ fn kernel([s0, s1, s2, s3, s4, s5, s6, s7]: [Wrapping<i32>; 8], x_scale: Wrappin
         xs: [x0 + x_scale, x1 + x_scale, x2 + x_scale, x3 + x_scale],
         ts: [t0, t1, t2, t3],
     }
-}
-
-// take a -128..127 value and stbi__clamp it and convert to 0..255
-fn stbi_clamp(Wrapping(x): Wrapping<i32>) -> u8 {
-    use crate::color_conversion::CLAMP_TABLE;
-
-    const MAX_SAMPLE: i32 = 0b11_1111_1111; // 2 bits wider than legal samples (?)
-
-    let x = ((x + 256) & MAX_SAMPLE) as usize;
-
-    debug_assert!(
-        MAX_SAMPLE as usize + 1 == CLAMP_TABLE.len(),
-        "{} == {}",
-        MAX_SAMPLE + 1,
-        CLAMP_TABLE.len()
-    );
-    unsafe { *CLAMP_TABLE.get_unchecked(x) }
 }
 
 fn stbi_f2f(x: f32) -> Wrapping<i32> {

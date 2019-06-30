@@ -25,3 +25,9 @@ mozjpeg = "0.8"
 [[bench]]
 name = "basic"
 harness = false
+
+[profile.bench]
+debug = true
+
+[profile.release]
+debug = true

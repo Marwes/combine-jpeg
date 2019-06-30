@@ -48,6 +48,7 @@ macro_rules! fixed_slice_mut {
 }
 
 mod biterator;
+mod clamp;
 mod color_conversion;
 mod huffman;
 mod idct;

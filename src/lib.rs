@@ -768,7 +768,7 @@ impl Decoder {
             let mut colors = ArrayVec::<[_; 4]>::new();
             colors.extend(upsampler.upsample_and_interleave_row(data, row, width));
 
-            color_convert_func(line, &colors, width);
+            color_convert_func(line, &colors);
         }
         Ok(image)
     }
@@ -857,7 +857,9 @@ impl Decoder {
                     let size = usize::from(component.block_size.width)
                         * usize::from(component.block_size.height)
                         * 64;
-                    result.resize(size, 0u8);
+
+                    // TODO perf: memset costs a few percent performance for no win
+                    result.resize(size, 0);
                 }
             }
 

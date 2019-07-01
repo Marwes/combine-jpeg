@@ -700,7 +700,7 @@ pub struct Decoder {
 }
 
 struct ScanState {
-    mcu_row_coefficients: Vec<Vec<i16>>,
+    mcu_row_coefficients: Vec<Box<[i16]>>,
     dummy_block: [i16; 64],
     dc_predictors: [i16; 4],
     eob_run: u16,
@@ -765,7 +765,7 @@ impl Decoder {
         let mut image = vec![0u8; line_size * height];
 
         for (row, line) in image.chunks_mut(line_size).enumerate() {
-            let mut colors = ArrayVec::<[_; 4]>::new();
+            let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
             colors.extend(upsampler.upsample_and_interleave_row(data, row, width));
 
             color_convert_func(line, &colors);
@@ -830,6 +830,7 @@ impl Decoder {
                                     * usize::from(component.vertical_sampling_factor)
                                     * 64
                             ]
+                            .into_boxed_slice()
                         })
                         .collect()
                 } else {
@@ -934,12 +935,13 @@ impl Decoder {
                     let frame = input.state.frame.as_ref().unwrap();
 
                     for (component_index, component) in frame.components.iter().enumerate() {
-                        let row_coefficients =
-                            if frame.coding_process() == CodingProcess::Progressive {
-                                unimplemented!()
-                            } else {
-                                &mut input.state.scan_state.mcu_row_coefficients[component_index]
-                            };
+                        let row_coefficients = if frame.coding_process()
+                            == CodingProcess::Progressive
+                        {
+                            unimplemented!()
+                        } else {
+                            &mut input.state.scan_state.mcu_row_coefficients[component_index][..]
+                        };
 
                         // Convert coefficients from a MCU row to samples.
                         let data = row_coefficients;

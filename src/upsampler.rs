@@ -65,10 +65,10 @@ impl Upsampler {
 
         self.components
             .iter_mut()
-            .enumerate()
-            .map(move |(i, component)| {
+            .zip(component_data)
+            .map(move |(component, data)| {
                 component.upsampler.upsample_row(
-                    &component_data[i],
+                    data,
                     component.width,
                     component.height,
                     component.row_stride,

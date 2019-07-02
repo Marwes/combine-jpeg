@@ -236,10 +236,11 @@ mod tests {
         assert!(max < 255);
     }
 
+    // Triggers a debug_assert! if it would produce an out of bounds value
     #[test]
     fn check_ycbr_convert_safety() {
-        for (y, (cb, cr)) in (0..=255).zip(iproduct!(0..=255, 0..=255)) {
-            ycbcr_to_rgb(y, cb, cr);
+        for (y, c) in iproduct!(0..=255, 0..=255) {
+            ycbcr_to_rgb(y, c, c);
         }
     }
 

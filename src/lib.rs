@@ -10,6 +10,7 @@ use combine::{
     parser,
     parser::{
         byte::num::be_u16,
+        combinator::factory,
         item::{any, eof, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, iterate, skip_many1},
@@ -513,6 +514,42 @@ where
     }
 }
 
+struct BiteratorConverter<P> {
+    parser: P,
+}
+impl<'s, 'a, Input, P, O, S> Parser<BiteratorStream<'s, Input>> for BiteratorConverter<P>
+where
+    Input: FullRangeStream<Item = u8, Range = &'a [u8]>,
+    Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
+    Input::Position: Default + fmt::Display,
+    P: Parser<DecoderStream<'s, Input>, Output = O, PartialState = S>,
+    S: Default,
+{
+    type Output = O;
+    type PartialState = S;
+
+    combine::parse_mode!(BiteratorStream<'s, Input>);
+
+    fn parse_mode_impl<M>(
+        &mut self,
+        mode: M,
+        input: &mut BiteratorStream<'s, Input>,
+        state: &mut Self::PartialState,
+    ) -> ParseResult<Self::Output, <BiteratorStream<'s, Input> as StreamOnce>::Error>
+    where
+        M: ParseMode,
+    {
+        self.parser
+            .parse_mode(mode, decoder_stream(input), state)
+            .map_err(|_err| {
+                <BiteratorStream<'s, Input> as StreamOnce>::Error::from_error(
+                    input.position(),
+                    StreamErrorFor::<BiteratorStream<'s, Input>>::message_message("FIXME"), // FIXME
+                )
+            })
+    }
+}
+
 fn sos<'a, 's, I>() -> impl Parser<DecoderStream<'s, I>, Output = ()> + 'a
 where
     I: FullRangeStream<
@@ -702,12 +739,12 @@ pub struct Decoder {
 struct ScanState {
     mcu_row_coefficients: Vec<Box<[i16]>>,
     dummy_block: [i16; 64],
-    dc_predictors: [i16; 4],
+    dc_predictors: [i16; MAX_COMPONENTS],
     eob_run: u16,
     expected_rst_num: u8,
     mcus_left_until_restart: u16,
     is_interleaved: bool,
-    results: [Vec<u8>; 4],
+    results: [Vec<u8>; MAX_COMPONENTS],
     offsets: [usize; 256],
 }
 
@@ -775,7 +812,7 @@ impl Decoder {
 
     fn decode_scan<'s, 'a, I>(
         produce_data: bool,
-    ) -> impl Parser<BiteratorStream<'s, I>, Output = Vec<Vec<u8>>>
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = Vec<Vec<u8>>> + 'a
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -892,7 +929,7 @@ impl Decoder {
     fn iteration_decode_scanner<'a, 's, I>(
         produce_data: bool,
         input: &mut BiteratorStream<'s, I>,
-    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()>
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()> + 'a
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -992,89 +1029,76 @@ impl Decoder {
     fn restart_parser<'s, 'a, I>(
         mcu_x: u16,
         mcu_y: u16,
-    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()>
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = ()> + 'a
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
         I::Position: Default + fmt::Display,
         's: 'a,
     {
-        parser(move |input: &mut BiteratorStream<'s, I>| {
-            if input.state.restart_interval > 0 {
-                let frame = input.state.frame.as_ref().unwrap();
-                let is_last_mcu =
-                    mcu_x == frame.mcu_size.width - 1 && mcu_y == frame.mcu_size.height - 1;
-                input.state.scan_state.mcus_left_until_restart -= 1;
-
-                if input.state.scan_state.mcus_left_until_restart == 0 && !is_last_mcu {
-                    match marker()
-                        .parse_stream(decoder_stream(input))
-                        .into_result()
-                        .map(|(marker, _)| marker)
-                    {
-                        Ok(Marker::RST(n)) => {
-                            if n != input.state.scan_state.expected_rst_num {
-                                return Err(Consumed::Consumed(
-                                    <BiteratorStream<I> as StreamOnce>::Error::from_error(
-                                        input.position(),
-                                        StreamErrorFor::<BiteratorStream<I>>::message_message(
-                                            format_args!(
-                                                "found RST{} where RST{} was expected",
-                                                n, input.state.scan_state.expected_rst_num
-                                            ),
-                                        ),
-                                    )
-                                    .into(),
-                                ));
-                            }
-
-                            input.stream.reset();
-
-                            // Section F.2.1.3.1
-                            input.state.scan_state.dc_predictors = [0i16; MAX_COMPONENTS];
-                            // Section G.1.2.2
-                            input.state.scan_state.eob_run = 0;
-
-                            input.state.scan_state.expected_rst_num =
-                                (input.state.scan_state.expected_rst_num + 1) % 8;
-                            input.state.scan_state.mcus_left_until_restart =
-                                input.state.restart_interval;
-                        }
-                        Ok(marker) => {
+        let handle_marker = |marker: Marker| {
+            parser(move |input: &mut DecoderStream<'s, I>| {
+                match marker {
+                    Marker::RST(n) => {
+                        if n != input.state.scan_state.expected_rst_num {
                             return Err(Consumed::Consumed(
-                                                <BiteratorStream<I> as StreamOnce>::Error::from_error(
-                                                    input.position(),
-                                                    StreamErrorFor::<BiteratorStream<I>>::message_message(
-                                                                        format_args!(
-                                                                            "found marker {:?} inside scan where RST({}) was expected",
-                                                                            marker,
-                                                                            input.state.scan_state.expected_rst_num
-                                                                        )
-                                                                    )
-                                                        )
-                                                .into()
-                                                    )
-                                            );
-                        }
-                        Err(_) => {
-                            return Err(Consumed::Consumed(
-                                <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                                <DecoderStream<I> as StreamOnce>::Error::from_error(
                                     input.position(),
-                                    StreamErrorFor::<BiteratorStream<I>>::message_message(
+                                    StreamErrorFor::<DecoderStream<I>>::message_message(
                                         format_args!(
-                                            "no marker found where RST{} was expected",
-                                            input.state.scan_state.expected_rst_num
+                                            "found RST{} where RST{} was expected",
+                                            n, input.state.scan_state.expected_rst_num
                                         ),
                                     ),
                                 )
                                 .into(),
                             ));
                         }
+
+                        input.stream.reset();
+
+                        // Section F.2.1.3.1
+                        input.state.scan_state.dc_predictors = [0i16; MAX_COMPONENTS];
+                        // Section G.1.2.2
+                        input.state.scan_state.eob_run = 0;
+
+                        input.state.scan_state.expected_rst_num =
+                            (input.state.scan_state.expected_rst_num + 1) % 8;
+                        input.state.scan_state.mcus_left_until_restart =
+                            input.state.restart_interval;
+                        Ok(((), Consumed::Empty(())))
                     }
+                    marker => Err(Consumed::Consumed(
+                        <DecoderStream<I> as StreamOnce>::Error::from_error(
+                            input.position(),
+                            StreamErrorFor::<DecoderStream<I>>::message_message(format_args!(
+                                "found marker {:?} inside scan where RST({}) was expected",
+                                marker, input.state.scan_state.expected_rst_num
+                            )),
+                        )
+                        .into(),
+                    )),
                 }
-            }
-            Ok(((), Consumed::Empty(())))
-        })
+            })
+        };
+        BiteratorConverter {
+            parser: factory(move |input: &mut DecoderStream<'s, I>| {
+                if input.state.restart_interval > 0 {
+                    let frame = input.state.frame.as_ref().unwrap();
+                    let is_last_mcu =
+                        mcu_x == frame.mcu_size.width - 1 && mcu_y == frame.mcu_size.height - 1;
+                    input.state.scan_state.mcus_left_until_restart -= 1;
+
+                    if input.state.scan_state.mcus_left_until_restart == 0 && !is_last_mcu {
+                        marker().then(handle_marker).left()
+                    } else {
+                        value(()).right()
+                    }
+                } else {
+                    value(()).right()
+                }
+            }),
+        }
     }
 
     fn decode_block_parser<'s, 'a, I>(

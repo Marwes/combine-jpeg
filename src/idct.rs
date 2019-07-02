@@ -19,6 +19,8 @@ pub fn dequantize_and_idct_block<'a>(
         Wrapping(i32::from(c) * i32::from(q))
     }
 
+    // SAFETY This gets fully initialized in the columns loop but since it iterates over columns
+    // LLVM does not realize this and elide the initialization
     let mut temp: [Wrapping<i32>; 64] = unsafe { std::mem::uninitialized() };
 
     // columns
@@ -85,26 +87,29 @@ pub fn dequantize_and_idct_block<'a>(
         let [s0, s1, s2, s3, s4, s5, s6, s7] = *chunk;
         if s1.0 == 0 && s2.0 == 0 && s3.0 == 0 && s4.0 == 0 && s5.0 == 0 && s6.0 == 0 && s7.0 == 0 {
             let dcterm = stbi_clamp((stbi_fsh(s0) + X_SCALE) >> 17);
-            for x in output_chunk {
-                *x = dcterm;
-            }
+            output_chunk[0] = dcterm;
+            output_chunk[1] = dcterm;
+            output_chunk[2] = dcterm;
+            output_chunk[3] = dcterm;
+            output_chunk[4] = dcterm;
+            output_chunk[5] = dcterm;
+            output_chunk[6] = dcterm;
+            output_chunk[7] = dcterm;
+        } else {
+            let Kernel {
+                xs: [x0, x1, x2, x3],
+                ts: [t0, t1, t2, t3],
+            } = kernel(*chunk, X_SCALE);
 
-            continue;
+            output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
+            output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
+            output_chunk[1] = stbi_clamp((x1 + t2) >> 17);
+            output_chunk[6] = stbi_clamp((x1 - t2) >> 17);
+            output_chunk[2] = stbi_clamp((x2 + t1) >> 17);
+            output_chunk[5] = stbi_clamp((x2 - t1) >> 17);
+            output_chunk[3] = stbi_clamp((x3 + t0) >> 17);
+            output_chunk[4] = stbi_clamp((x3 - t0) >> 17);
         }
-
-        let Kernel {
-            xs: [x0, x1, x2, x3],
-            ts: [t0, t1, t2, t3],
-        } = kernel(*chunk, X_SCALE);
-
-        output_chunk[0] = stbi_clamp((x0 + t3) >> 17);
-        output_chunk[7] = stbi_clamp((x0 - t3) >> 17);
-        output_chunk[1] = stbi_clamp((x1 + t2) >> 17);
-        output_chunk[6] = stbi_clamp((x1 - t2) >> 17);
-        output_chunk[2] = stbi_clamp((x2 + t1) >> 17);
-        output_chunk[5] = stbi_clamp((x2 - t1) >> 17);
-        output_chunk[3] = stbi_clamp((x3 + t0) >> 17);
-        output_chunk[4] = stbi_clamp((x3 - t0) >> 17);
     }
 }
 

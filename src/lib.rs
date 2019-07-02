@@ -279,11 +279,49 @@ where
         )
 }
 
-static UNZIGZAG: [u8; 64] = [
+struct UnZigZag<'a, T> {
+    out: &'a mut [T; 64],
+    index: u8,
+    end: u8,
+}
+
+impl<'a, T> UnZigZag<'a, T> {
+    pub fn new(out: &'a mut [T; 64], index: u8, end: u8) -> Self {
+        assert!(index <= end && end <= 63);
+        Self { out, index, end }
+    }
+
+    pub fn write(&mut self, value: T) {
+        // SAFETY UNZIGZAG only contains values in 0..64 and `index` is always in the range 0..64
+        unsafe {
+            *self.out.get_unchecked_mut(usize::from(
+                *UNZIGZAG.get_unchecked(usize::from(self.index)),
+            )) = value;
+        }
+    }
+
+    pub fn step(mut self, steps: u8) -> Option<Self> {
+        self.index += steps;
+        if self.index <= self.end {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+const UNZIGZAG: [u8; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
     13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
+
+fn unzigzag<T>(out: &mut [T; 64], index: u8, value: T) {
+    // SAFETY UNZIGZAG only contains values in 0..64
+    unsafe {
+        *out.get_unchecked_mut(usize::from(UNZIGZAG[usize::from(index)])) = value;
+    }
+}
 
 struct QuantizationTable([u16; 64]);
 
@@ -292,7 +330,7 @@ impl QuantizationTable {
         let mut quantization_table = [0u16; 64];
 
         for j in 0..64 {
-            quantization_table[usize::from(UNZIGZAG[j])] = dqt.table[j];
+            unzigzag(&mut quantization_table, j, dqt.table[usize::from(j)]);
         }
 
         Self(quantization_table)
@@ -897,7 +935,10 @@ impl Decoder {
                         * 64;
 
                     // TODO perf: memset costs a few percent performance for no win
-                    result.resize(size, 0);
+                    result.reserve(size);
+                    unsafe {
+                        result.set_len(size);
+                    }
                 }
             }
 
@@ -1227,60 +1268,69 @@ impl Decoder {
             coefficients[0] = *dc_predictor << scan.low_approximation;
         }
 
-        let mut index = scan.start_of_selection.max(1);
+        let index = scan.start_of_selection.max(1);
 
-        if index <= scan.end_of_selection && *eob_run > 0 {
+        // Hint to LLVM so that a (valid) end of selection is max 63 so it can remove the bounds check in `unzigzag`
+        let end_of_selection = scan.end_of_selection.min(63);
+
+        if index <= end_of_selection && *eob_run > 0 {
             *eob_run -= 1;
             return Ok(());
         }
 
-        // Section F.1.2.2.1
-        while index <= scan.end_of_selection {
-            if let Some((value, run)) = ac_table
-                .decode_fast_ac(input)
-                .map_err(|()| "Unable to huffman decode")?
-            {
-                index += run;
+        if index < end_of_selection {
+            let mut unzigzag = UnZigZag::new(coefficients, index, end_of_selection);
 
-                if index > scan.end_of_selection {
-                    break;
+            macro_rules! step {
+                ($i: expr) => {
+                    unzigzag = match unzigzag.step($i) {
+                        Some(x) => x,
+                        None => break,
+                    };
                 }
+            }
 
-                coefficients[usize::from(UNZIGZAG[usize::from(index)])] =
-                    value << scan.low_approximation;
-                index += 1;
-            } else {
-                let byte = ac_table
-                    .decode(input)
-                    .ok_or_else(|| "Unable to huffman decode")?;
-                let r = byte >> 4;
-                let s = byte & 0x0f;
+            // Section F.1.2.2.1
+            loop {
+                if let Some((value, run)) = ac_table
+                    .decode_fast_ac(input)
+                    .map_err(|()| "Unable to huffman decode")?
+                {
+                    step!(run);
 
-                if s == 0 {
-                    match r {
-                        15 => index += 16, // Run length of 16 zero coefficients.
-                        _ => {
-                            *eob_run = (1 << r) - 1;
-
-                            if r > 0 {
-                                *eob_run += input.next_bits(r).ok_or_else(|| "out of bits")?;
-                            }
-
-                            break;
-                        }
-                    }
+                    unzigzag.write(value << scan.low_approximation);
+                    step!(1);
                 } else {
-                    index += r;
+                    let byte = ac_table
+                        .decode(input)
+                        .ok_or_else(|| "Unable to huffman decode")?;
+                    let r = byte >> 4;
+                    let s = byte & 0x0f;
 
-                    if index > scan.end_of_selection {
-                        break;
+                    if s == 0 {
+                        match r {
+                            15 => step!(16),
+                            _ => {
+                                *eob_run = (1 << r) - 1;
+
+                                if r > 0 {
+                                    *eob_run += input.next_bits(r).ok_or_else(|| "out of bits")?;
+                                }
+
+                                break;
+                            }
+                        }
+                    } else {
+                        step!(r);
+
+                        unzigzag.write(
+                            input
+                                .receive_extend(s)
+                                .ok_or_else(|| "Invalid receive_extend")?
+                                << scan.low_approximation,
+                        );
+                        step!(1);
                     }
-
-                    coefficients[usize::from(UNZIGZAG[usize::from(index)])] = input
-                        .receive_extend(s)
-                        .ok_or_else(|| "Invalid receive_extend")?
-                        << scan.low_approximation;
-                    index += 1;
                 }
             }
         }

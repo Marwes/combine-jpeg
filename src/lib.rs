@@ -1087,8 +1087,6 @@ impl Decoder {
             }
 
             *offset += row_coefficients.len();
-
-            zero_data(row_coefficients);
         }
     }
 
@@ -1218,10 +1216,13 @@ impl Decoder {
                 * 64;
             let coefficients = if produce_data {
                 let start = block_offset - mcu_row_offset;
-                fixed_slice_mut!(&mut input.state.scan_state.mcu_row_coefficients[i][start..start + 64]; 64)
+                let row_coefficients = &mut input.state.scan_state.mcu_row_coefficients[i];
+                fixed_slice_mut!(&mut row_coefficients[start..start + 64]; 64)
             } else {
                 &mut input.state.scan_state.dummy_block
             };
+
+            zero_data(coefficients);
 
             let dc_table = input.state.dc_huffman_tables
                 [usize::from(scan_header.dc_table_selector)]

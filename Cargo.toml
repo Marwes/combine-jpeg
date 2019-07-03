@@ -8,13 +8,13 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "0.4"
+combine = { version = "4.0.0-alpha.1", path = "../combine" }
 derive_more = "0.15"
 itertools = "0.8"
 log = "0.4"
-combine = { version = "4.0.0-alpha.1", path = "../combine" }
 
 [dev-dependencies]
-criterion = "0.2"
+criterion = { version = "0.2", default-features = false }
 env_logger = "0.6"
 image = "0.21"
 mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
@@ -25,6 +25,11 @@ harness = false
 
 [profile.bench]
 debug = true
+lto = true
+codegen-units = 1
 
 [profile.release]
 debug = true
+lto = true
+codegen-units = 1
+panic = "abort"

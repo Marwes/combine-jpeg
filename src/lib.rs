@@ -4,6 +4,8 @@ use arrayvec::ArrayVec;
 
 use derive_more::{Display, From};
 
+use itertools::izip;
+
 use combine::{
     dispatch, easy,
     error::{Consumed, ParseError, StreamError},
@@ -81,6 +83,12 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 const MAX_COMPONENTS: usize = 4;
 
 type ComponentVec<T> = ArrayVec<[T; MAX_COMPONENTS]>;
+
+fn zero_data(data: &mut [i16]) {
+    unsafe {
+        std::ptr::write_bytes(data.as_mut_ptr(), 0, data.len());
+    }
+}
 
 fn split_4_bit<'a, I>() -> impl Parser<I, Output = (u8, u8)>
 where
@@ -361,8 +369,8 @@ where
     where
         T: IntoIterator<Item = A>,
     {
-        for (i, from) in (0..64).zip(iter) {
-            self.table[i] = from.into();
+        for (to, from) in self.table.iter_mut().zip(iter) {
+            *to = from.into();
         }
     }
 }
@@ -792,7 +800,7 @@ struct ScanState {
     mcus_left_until_restart: u16,
     is_interleaved: bool,
     results: ComponentVec<Vec<u8>>,
-    offsets: [usize; 256],
+    offsets: [usize; MAX_COMPONENTS],
 }
 
 impl Default for ScanState {
@@ -800,13 +808,13 @@ impl Default for ScanState {
         ScanState {
             mcu_row_coefficients: Default::default(),
             dummy_block: [0; 64],
-            dc_predictors: [0; 4],
+            dc_predictors: [0; MAX_COMPONENTS],
             eob_run: 0,
             expected_rst_num: 0,
             mcus_left_until_restart: 0,
             is_interleaved: false,
             results: Default::default(),
-            offsets: [0; 256],
+            offsets: [0; MAX_COMPONENTS],
         }
     }
 }
@@ -923,14 +931,14 @@ impl Decoder {
 
             input.state.scan_state = ScanState {
                 dummy_block: [0i16; 64],
-                dc_predictors: [0i16; 4],
+                dc_predictors: [0i16; MAX_COMPONENTS],
                 eob_run: 0,
                 expected_rst_num: 0,
                 mcus_left_until_restart: input.state.restart_interval,
                 is_interleaved: frame.components.len() > 1,
                 mcu_row_coefficients,
                 results: Default::default(),
-                offsets: [0; 256],
+                offsets: [0; MAX_COMPONENTS],
             };
 
             if produce_data {
@@ -1024,61 +1032,64 @@ impl Decoder {
             })
             .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
                 if produce_data {
-                    let frame = input.state.frame.as_ref().unwrap();
-
-                    for (component_index, component) in frame.components.iter().enumerate() {
-                        let row_coefficients = if frame.coding_process()
-                            == CodingProcess::Progressive
-                        {
-                            unimplemented!()
-                        } else {
-                            &mut input.state.scan_state.mcu_row_coefficients[component_index][..]
-                        };
-
-                        // Convert coefficients from a MCU row to samples.
-                        let data = row_coefficients;
-                        let offset = input.state.scan_state.offsets[component_index];
-
-                        let quantization_table = input.state.quantization_tables
-                            [usize::from(component.quantization_table_destination_selector)]
-                        .as_ref()
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Missing quantization table {}",
-                                component.quantization_table_destination_selector
-                            )
-                        });
-
-                        let block_count = usize::from(component.block_size.width)
-                            * usize::from(component.vertical_sampling_factor);
-                        let line_stride = usize::from(component.block_size.width) * 8;
-
-                        assert_eq!(data.len(), block_count * 64);
-
-                        let component_result =
-                            &mut input.state.scan_state.results[component_index][offset..];
-                        for i in 0..block_count {
-                            let x = (i % usize::from(component.block_size.width)) * 8;
-                            let y = (i / usize::from(component.block_size.width)) * 8;
-                            let start = i * 64;
-                            idct::dequantize_and_idct_block(
-                                fixed_slice!(&data[start..start + 64]; 64),
-                                &quantization_table.0,
-                                component_result[y * line_stride + x..]
-                                    .chunks_mut(line_stride)
-                                    .map(|chunk| fixed_slice_mut!(&mut chunk[..8]; 8)),
-                            );
-                        }
-
-                        input.state.scan_state.offsets[component_index] += data.len();
-
-                        for x in data {
-                            *x = 0;
-                        }
-                    }
+                    input.state.dequantize();
                 }
             })
         })
+    }
+
+    fn dequantize(&mut self) {
+        let frame = self.frame.as_ref().unwrap();
+
+        for (component_index, (component, offset, result)) in izip!(
+            &frame.components,
+            &mut self.scan_state.offsets,
+            &mut self.scan_state.results
+        )
+        .enumerate()
+        {
+            let row_coefficients = if frame.coding_process() == CodingProcess::Progressive {
+                unimplemented!()
+            } else {
+                &mut self.scan_state.mcu_row_coefficients[component_index][..]
+            };
+
+            // Convert coefficients from a MCU row to samples.
+
+            let quantization_table = self.quantization_tables
+                [usize::from(component.quantization_table_destination_selector)]
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing quantization table {}",
+                    component.quantization_table_destination_selector
+                )
+            });
+
+            let block_count = usize::from(component.block_size.width)
+                * usize::from(component.vertical_sampling_factor);
+            let line_stride = usize::from(component.block_size.width) * 8;
+
+            assert_eq!(row_coefficients.len(), block_count * 64);
+
+            let component_result = &mut result[*offset..];
+            for i in 0..block_count {
+                let x = (i % usize::from(component.block_size.width)) * 8;
+                let y = (i / usize::from(component.block_size.width)) * 8;
+                let start = i * 64;
+                idct::dequantize_and_idct_block(
+                    fixed_slice!(&row_coefficients[start..start + 64]; 64),
+                    &quantization_table.0,
+                    component_result[y * line_stride + x..]
+                        .chunks_mut(line_stride)
+                        .map(|chunk| fixed_slice_mut!(&mut chunk[..8]; 8)),
+                );
+            }
+
+            *offset += row_coefficients.len();
+
+            zero_data(row_coefficients);
+        }
     }
 
     fn restart_parser<'s, 'a, I>(
@@ -1370,20 +1381,19 @@ impl Decoder {
             Marker::SOI | Marker::RST(_) | Marker::COM | Marker::EOI => value(()),
             Marker::SOF(i) => segment(sof(i)).map_input(move |frame, self_: &mut DecoderStream<'s, I>| self_.state.frame = Some(frame)),
             Marker::DHT => {
-                segment(skip_many1(huffman_table().map_input(move |dht, self_: &mut DecoderStream<'s, I>| {
+                segment(skip_many1(huffman_table().map_input(move |dht, self_: &mut DecoderStream<'s, I>| -> Result<_, _> {
                     match dht.table_class {
                         huffman::TableClass::AC => {
                             self_.state.ac_huffman_tables[usize::from(dht.destination)] =
-                                Some(huffman::AcTable::new(dht.code_lengths, dht.values)
-                                    .unwrap()); // FIXME
+                                Some(huffman::AcTable::new(dht.code_lengths, dht.values)?);
                         }
                         huffman::TableClass::DC => {
                             self_.state.dc_huffman_tables[usize::from(dht.destination)] =
-                                Some(huffman::DcTable::new(dht.code_lengths, dht.values)
-                                    .unwrap()); // FIXME
+                                Some(huffman::DcTable::new(dht.code_lengths, dht.values)?);
                         }
                     }
-                })))
+                    Ok(())
+                }).and_then(|result| result.map_err(StreamErrorFor::<I>::message_static_message))))
             },
             Marker::DQT => segment(skip_many1(dqt().map_input(move |dqt, self_: &mut DecoderStream<'s, I>| {
                 self_.state.quantization_tables[usize::from(dqt.identifier)] =

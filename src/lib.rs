@@ -763,8 +763,8 @@ where
 pub struct Decoder {
     pub frame: Option<Frame>,
     scan: Option<Scan>,
-    ac_huffman_tables: [Option<huffman::Table>; 16],
-    dc_huffman_tables: [Option<huffman::Table>; 16],
+    ac_huffman_tables: [Option<huffman::AcTable>; 16],
+    dc_huffman_tables: [Option<huffman::DcTable>; 16],
     quantization_tables: [Option<QuantizationTable>; 4],
     planes: Vec<Vec<u8>>,
     color_transform: Option<AdobeColorTransform>,
@@ -1236,8 +1236,8 @@ impl Decoder {
     fn decode_block<I>(
         coefficients: &mut [i16; 64],
         scan: &Scan,
-        dc_table: &huffman::Table,
-        ac_table: &huffman::Table,
+        dc_table: &huffman::DcTable,
+        ac_table: &huffman::AcTable,
         input: &mut biterator::Biterator<I>,
         eob_run: &mut u16,
         dc_predictor: &mut i16,
@@ -1357,15 +1357,16 @@ impl Decoder {
             Marker::SOF(i) => segment(sof(i)).map_input(move |frame, self_: &mut DecoderStream<'s, I>| self_.state.frame = Some(frame)),
             Marker::DHT => {
                 segment(skip_many1(huffman_table().map_input(move |dht, self_: &mut DecoderStream<'s, I>| {
-                    let table =
-                        huffman::Table::new(dht.code_lengths, dht.values, dht.table_class)
-                            .unwrap(); // FIXME
                     match dht.table_class {
                         huffman::TableClass::AC => {
-                            self_.state.ac_huffman_tables[usize::from(dht.destination)] = Some(table)
+                            self_.state.ac_huffman_tables[usize::from(dht.destination)] =
+                                Some(huffman::AcTable::new(dht.code_lengths, dht.values)
+                                    .unwrap()); // FIXME
                         }
                         huffman::TableClass::DC => {
-                            self_.state.dc_huffman_tables[usize::from(dht.destination)] = Some(table)
+                            self_.state.dc_huffman_tables[usize::from(dht.destination)] =
+                                Some(huffman::DcTable::new(dht.code_lengths, dht.values)
+                                    .unwrap()); // FIXME
                         }
                     }
                 })))

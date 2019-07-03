@@ -20,7 +20,7 @@ env_logger = "0.6"
 dssim = "2"
 image = "0.21"
 huffman-compress = "0.6"
-mozjpeg = "0.8"
+mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
 
 [[bench]]
 name = "basic"

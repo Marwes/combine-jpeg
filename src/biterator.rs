@@ -74,6 +74,13 @@ where
         ((self.bits >> (64 - count)) & ((1 << count) - 1)) as u16
     }
 
+    pub fn peek_bits_u8(&self, count: u8) -> u8 {
+        debug_assert!(self.count >= count);
+        assert!(count <= 8);
+
+        ((self.bits >> (64 - count)) & ((1 << count) - 1)) as u8
+    }
+
     pub fn fill_bits(&mut self) -> Option<()> {
         while self.count <= 56 {
             let checkpoint = self.checkpoint();

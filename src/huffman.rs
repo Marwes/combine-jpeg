@@ -23,34 +23,44 @@ impl TableClass {
 
 const LUT_BITS: u8 = 8;
 
-pub(crate) struct Table {
+pub(crate) struct BaseTable {
     // TODO Use array?
     values: Vec<u8>,
     // TODO i32 seems redundant here
     max_code: [i32; 16],
     val_offset: [i32; 16],
     lut: [(u8, u8); 1 << LUT_BITS],
-    ac_lut: Option<[(i16, u8); 1 << LUT_BITS]>,
 }
 
-impl Default for Table {
+impl Default for BaseTable {
     fn default() -> Self {
-        Table {
+        BaseTable {
             values: Default::default(),
             max_code: Default::default(),
             val_offset: Default::default(),
             lut: [(0, 0); 1 << LUT_BITS],
-            ac_lut: Default::default(),
         }
     }
 }
 
-impl Table {
-    pub(crate) fn new(
-        bits: &[u8; 16],
-        values: &[u8],
-        class: TableClass,
-    ) -> Result<Table, &'static str> {
+pub(crate) type DcTable = BaseTable;
+
+pub(crate) struct AcTable {
+    table: BaseTable,
+    ac_lut: [(i16, u8); 1 << LUT_BITS],
+}
+
+impl Default for AcTable {
+    fn default() -> Self {
+        AcTable {
+            table: Default::default(),
+            ac_lut: [(0, 0); 1 << LUT_BITS],
+        }
+    }
+}
+
+impl BaseTable {
+    pub(crate) fn new(bits: &[u8; 16], values: &[u8]) -> Result<Self, &'static str> {
         log::trace!("Table::new({:?}, {:?})", bits, values);
         debug_assert!(values.len() <= 256);
 
@@ -76,7 +86,7 @@ impl Table {
             code += 1;
         }
 
-        let mut table = Table::default();
+        let mut table = BaseTable::default();
         table.values = values.to_owned();
 
         let mut p = 0i32;
@@ -105,29 +115,6 @@ impl Table {
                 table.lut[start + j] = (values[i], size);
             }
         }
-
-        table.ac_lut = match class {
-            TableClass::DC => None,
-            TableClass::AC => {
-                let mut ac_lut = [(0i16, 0u8); 1 << LUT_BITS];
-
-                for (i, &(value, size)) in table.lut.iter().enumerate() {
-                    let run_length = value >> 4;
-                    let magnitude_category = value & 0x0f;
-
-                    if magnitude_category > 0 && size + magnitude_category <= LUT_BITS {
-                        let unextended_ac_value = (((i << size) & ((1 << LUT_BITS) - 1))
-                            >> (LUT_BITS - magnitude_category))
-                            as u16;
-                        let ac_value = extend(unextended_ac_value, magnitude_category);
-
-                        ac_lut[i] = (ac_value, (run_length << 4) | (size + magnitude_category));
-                    }
-                }
-
-                Some(ac_lut)
-            }
-        };
 
         Ok(table)
     }
@@ -165,6 +152,39 @@ impl Table {
             None
         }
     }
+}
+
+impl AcTable {
+    pub(crate) fn new(bits: &[u8; 16], values: &[u8]) -> Result<Self, &'static str> {
+        let table = BaseTable::new(bits, values)?;
+
+        let mut ac_lut = [(0i16, 0u8); 1 << LUT_BITS];
+
+        for (i, &(value, size)) in table.lut.iter().enumerate() {
+            let run_length = value >> 4;
+            let magnitude_category = value & 0x0f;
+
+            if magnitude_category > 0 && size + magnitude_category <= LUT_BITS {
+                let unextended_ac_value = (((i << size) & ((1 << LUT_BITS) - 1))
+                    >> (LUT_BITS - magnitude_category))
+                    as u16;
+                let ac_value = extend(unextended_ac_value, magnitude_category);
+
+                ac_lut[i] = (ac_value, (run_length << 4) | (size + magnitude_category));
+            }
+        }
+
+        Ok(AcTable { table, ac_lut })
+    }
+
+    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Option<u8>
+    where
+        I: Stream<Item = u8>,
+        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I::Position: Default,
+    {
+        self.table.decode(input)
+    }
 
     pub(crate) fn decode_fast_ac<I>(
         &self,
@@ -175,23 +195,21 @@ impl Table {
         I::Error: ParseError<I::Item, I::Range, I::Position>,
         I::Position: Default,
     {
-        if let Some(ac_lut) = &self.ac_lut {
+        if input.count() < LUT_BITS {
+            input.fill_bits();
             if input.count() < LUT_BITS {
-                input.fill_bits();
-                if input.count() < LUT_BITS {
-                    return Ok(None);
-                }
+                return Ok(None);
             }
+        }
 
-            let (value, run_size) = ac_lut[input.peek_bits(LUT_BITS) as usize];
+        let (value, run_size) = self.ac_lut[usize::from(input.peek_bits_u8(LUT_BITS))];
 
-            if run_size != 0 {
-                let run = run_size >> 4;
-                let size = run_size & 0x0f;
+        if run_size != 0 {
+            let run = run_size >> 4;
+            let size = run_size & 0x0f;
 
-                input.consume_bits(size);
-                return Ok(Some((value, run)));
-            }
+            input.consume_bits(size);
+            return Ok(Some((value, run)));
         }
 
         Ok(None)
@@ -287,7 +305,14 @@ mod tests {
     };
 
     fn run_test(test_table: &TestTable) {
-        Table::new(&test_table.bits, &test_table.values, test_table.table_class).unwrap();
+        match test_table.table_class {
+            TableClass::AC => {
+                AcTable::new(&test_table.bits, &test_table.values).unwrap();
+            }
+            TableClass::DC => {
+                DcTable::new(&test_table.bits, &test_table.values).unwrap();
+            }
+        }
     }
 
     #[test]

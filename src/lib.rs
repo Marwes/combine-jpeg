@@ -11,7 +11,7 @@ use combine::{
     parser::{
         byte::num::be_u16,
         combinator::factory,
-        item::{any, eof, satisfy_map, value},
+        item::{any, eof, satisfy, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, iterate, skip_many1},
         ParseMode,
@@ -422,7 +422,7 @@ where
 
 #[derive(Debug)]
 struct Scan {
-    headers: Vec<ScanHeader>,
+    headers: ArrayVec<[ScanHeader; MAX_COMPONENTS]>,
     start_of_selection: u8,
     end_of_selection: u8,
     high_approximation: u8,
@@ -444,33 +444,40 @@ where
 {
     let mut max_index: Option<u8> = None;
     (
-        any().then_partial(move |&mut image_components| {
-            let image_components = usize::from(image_components);
-            count_min_max::<Vec<_>, _, _>(
-                image_components,
-                image_components,
-                (any(), split_4_bit())
-                    .map_input(
-                        move |(component_identifier, (dc_table_selector, ac_table_selector)),
-                              self_: &mut DecoderStream<'s, I>|
-                              -> Result<_, StreamErrorFor<I>> {
-                            let frame = self_.state.frame.as_ref().ok_or_else(|| {
-                                StreamErrorFor::<I>::message_static_message("Found SOS before SOF")
-                            })?;
-                            debug_assert!(frame.components.len() <= 256);
-                            let component_index = frame
-                                .components
-                                .iter()
-                                .position(|c| c.component_identifier == component_identifier)
-                                .ok_or_else(|| {
+        satisfy(|i| (1..=(MAX_COMPONENTS as u8)).contains(&i))
+            .expected("The number of image components must be be between 1 and 4 (inclusive)")
+            .then_partial(move |&mut image_components| {
+                let image_components = usize::from(image_components);
+                count_min_max::<ArrayVec<[_; MAX_COMPONENTS]>, _, _>(
+                    image_components,
+                    image_components,
+                    (any(), split_4_bit())
+                        .map_input(
+                            move |(
+                                component_identifier,
+                                (dc_table_selector, ac_table_selector),
+                            ),
+                                  self_: &mut DecoderStream<'s, I>|
+                                  -> Result<_, StreamErrorFor<I>> {
+                                let frame = self_.state.frame.as_ref().ok_or_else(|| {
                                     StreamErrorFor::<I>::message_static_message(
-                                        "Component does not exist in frame",
+                                        "Found SOS before SOF",
                                     )
-                                })? as u8;
+                                })?;
+                                debug_assert!(frame.components.len() <= 256);
+                                let component_index = frame
+                                    .components
+                                    .iter()
+                                    .position(|c| c.component_identifier == component_identifier)
+                                    .ok_or_else(|| {
+                                        StreamErrorFor::<I>::message_static_message(
+                                            "Component does not exist in frame",
+                                        )
+                                    })? as u8;
 
-                            if let Some(max_index) = max_index {
-                                use std::cmp::Ordering;
-                                match component_index.cmp(&max_index) {
+                                if let Some(max_index) = max_index {
+                                    use std::cmp::Ordering;
+                                    match component_index.cmp(&max_index) {
                                     Ordering::Less => {
                                         return Err(StreamErrorFor::<I>::message_static_message(
                                             "Component index is smaller than the previous indicies",
@@ -483,19 +490,19 @@ where
                                     }
                                     Ordering::Greater => (),
                                 }
-                            }
-                            max_index = Some(component_index);
+                                }
+                                max_index = Some(component_index);
 
-                            Ok(ScanHeader {
-                                component_index,
-                                dc_table_selector,
-                                ac_table_selector,
-                            })
-                        },
-                    )
-                    .and_then(|result| result),
-            )
-        }),
+                                Ok(ScanHeader {
+                                    component_index,
+                                    dc_table_selector,
+                                    ac_table_selector,
+                                })
+                            },
+                        )
+                        .and_then(|result| result),
+                )
+            }),
         any(),
         any(),
         split_4_bit(),

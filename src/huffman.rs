@@ -24,9 +24,7 @@ impl TableClass {
 const LUT_BITS: u8 = 8;
 
 pub(crate) struct BaseTable {
-    // TODO Use array?
     values: Vec<u8>,
-    // TODO i32 seems redundant here
     max_code: [i32; 16],
     val_offset: [i32; 16],
     lut: [(u8, u8); 1 << LUT_BITS],
@@ -67,7 +65,7 @@ impl BaseTable {
         let huffsize = huffsize(bits)?;
         log::trace!("huffsize: {:?}", huffsize);
 
-        let mut huffcode = [0u16; 256]; // Size?
+        let mut huffcode = [0u16; 256];
         let mut code = 0u32;
         let mut code_size = huffsize[0];
 
@@ -109,7 +107,7 @@ impl BaseTable {
             .filter(|&(_, &size)| size <= LUT_BITS)
         {
             let bits_remaining = LUT_BITS - size;
-            let start = (huffcode[i] << bits_remaining) as usize;
+            let start = usize::from(huffcode[i] << bits_remaining);
 
             for j in 0..1 << bits_remaining {
                 table.lut[start + j] = (values[i], size);

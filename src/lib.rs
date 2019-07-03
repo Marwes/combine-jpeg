@@ -80,6 +80,8 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 const MAX_COMPONENTS: usize = 4;
 
+type ComponentVec<T> = ArrayVec<[T; MAX_COMPONENTS]>;
+
 fn split_4_bit<'a, I>() -> impl Parser<I, Output = (u8, u8)>
 where
     I: FullRangeStream<Item = u8, Range = &'a [u8]>,
@@ -422,7 +424,7 @@ where
 
 #[derive(Debug)]
 struct Scan {
-    headers: ArrayVec<[ScanHeader; MAX_COMPONENTS]>,
+    headers: ComponentVec<ScanHeader>,
     start_of_selection: u8,
     end_of_selection: u8,
     high_approximation: u8,
@@ -448,7 +450,7 @@ where
             .expected("The number of image components must be be between 1 and 4 (inclusive)")
             .then_partial(move |&mut image_components| {
                 let image_components = usize::from(image_components);
-                count_min_max::<ArrayVec<[_; MAX_COMPONENTS]>, _, _>(
+                count_min_max::<ComponentVec<_>, _, _>(
                     image_components,
                     image_components,
                     (any(), split_4_bit())
@@ -773,7 +775,7 @@ pub struct Decoder {
     ac_huffman_tables: [Option<huffman::AcTable>; 16],
     dc_huffman_tables: [Option<huffman::DcTable>; 16],
     quantization_tables: [Option<QuantizationTable>; 4],
-    planes: Vec<Vec<u8>>,
+    planes: ComponentVec<Vec<u8>>,
     color_transform: Option<AdobeColorTransform>,
     restart_interval: u16,
     coefficients_finished: [u64; MAX_COMPONENTS],
@@ -782,21 +784,21 @@ pub struct Decoder {
 }
 
 struct ScanState {
-    mcu_row_coefficients: Vec<Box<[i16]>>,
+    mcu_row_coefficients: ComponentVec<Box<[i16]>>,
     dummy_block: [i16; 64],
     dc_predictors: [i16; MAX_COMPONENTS],
     eob_run: u16,
     expected_rst_num: u8,
     mcus_left_until_restart: u16,
     is_interleaved: bool,
-    results: [Vec<u8>; MAX_COMPONENTS],
+    results: ComponentVec<Vec<u8>>,
     offsets: [usize; 256],
 }
 
 impl Default for ScanState {
     fn default() -> Self {
         ScanState {
-            mcu_row_coefficients: vec![],
+            mcu_row_coefficients: Default::default(),
             dummy_block: [0; 64],
             dc_predictors: [0; 4],
             eob_run: 0,
@@ -857,7 +859,7 @@ impl Decoder {
 
     fn decode_scan<'s, 'a, I>(
         produce_data: bool,
-    ) -> impl Parser<BiteratorStream<'s, I>, Output = Vec<Vec<u8>>> + 'a
+    ) -> impl Parser<BiteratorStream<'s, I>, Output = ComponentVec<Vec<u8>>> + 'a
     where
         I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
         I::Error: ParseError<I::Item, I::Range, I::Position>,
@@ -900,7 +902,7 @@ impl Decoder {
                 ));
             }
 
-            let mcu_row_coefficients: Vec<_> =
+            let mcu_row_coefficients: ComponentVec<_> =
                 if produce_data && frame.coding_process() != CodingProcess::Progressive {
                     frame
                         .components
@@ -916,7 +918,7 @@ impl Decoder {
                         })
                         .collect()
                 } else {
-                    Vec::new()
+                    ComponentVec::new()
                 };
 
             input.state.scan_state = ScanState {
@@ -932,11 +934,16 @@ impl Decoder {
             };
 
             if produce_data {
-                for (component, result) in frame
-                    .components
-                    .iter()
-                    .zip(&mut input.state.scan_state.results[..])
-                {
+                let results = &mut input.state.scan_state.results;
+
+                while results.len() < frame.components.len() {
+                    results.push(Vec::new());
+                }
+                while results.len() > frame.components.len() {
+                    results.pop();
+                }
+
+                for (component, result) in frame.components.iter().zip(results) {
                     let size = usize::from(component.block_size.width)
                         * usize::from(component.block_size.height)
                         * 64;

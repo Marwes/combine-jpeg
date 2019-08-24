@@ -99,8 +99,6 @@ impl BaseTable {
         }
 
         // Build a lookup table for faster decoding.
-        table.lut = [(0u8, 0u8); 1 << LUT_BITS];
-
         for (i, &size) in huffsize
             .iter()
             .enumerate()
@@ -109,8 +107,9 @@ impl BaseTable {
             let bits_remaining = LUT_BITS - size;
             let start = usize::from(huffcode[i] << bits_remaining);
 
-            for j in 0..1 << bits_remaining {
-                table.lut[start + j] = (values[i], size);
+            let v = (values[i], size);
+            for slot in &mut table.lut[start..start + (1 << bits_remaining)] {
+                *slot = v;
             }
         }
 

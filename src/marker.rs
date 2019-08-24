@@ -61,17 +61,13 @@ where
         }
     }
 
-    combine::parser(|input: &mut I| {
-        eprintln!("{}", input.is_partial());
-        Ok(((), combine::error::Consumed::Empty(())))
-    })
-    .with(no_partial(sep_by1::<Sink, _, _, _>(
+    no_partial(sep_by1::<Sink, _, _, _>(
         (
             take_until_byte(0xFF),      // mozjpeg skips any non marker bytes (non 0xFF)
             take_while1(|b| b == 0xFF), // Extraenous 0xFF bytes are allowed
         ),
         byte(0x00).expected("stuffed zero"), // When we encounter a 0x00, we found a stuffed zero (FF/00) sequence so we search again
-    )))
+    ))
     .with(
         satisfy_map(|b| {
             Some(match b {

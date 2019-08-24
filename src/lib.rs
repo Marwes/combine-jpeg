@@ -16,7 +16,7 @@ use combine::{
         combinator::{any_send_partial_state, factory, no_partial, AnySendPartialState},
         item::{any, eof, satisfy, satisfy_map, value},
         range::{range, take},
-        repeat::{count_min_max, iterate, repeat_skip_until, skip_many1},
+        repeat::{count_min_max, iterate, repeat_skip_until},
         ParseMode,
     },
     stream::{

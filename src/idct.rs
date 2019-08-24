@@ -4,7 +4,10 @@
 // One example is tests/crashtest/images/imagetestsuite/b0b8914cc5f7a6eff409f16d8cc236c5.jpg
 // That's why wrapping operators are needed.
 
-use std::num::Wrapping;
+use std::{
+    mem::{self, MaybeUninit},
+    num::Wrapping,
+};
 
 use crate::clamp::stbi_clamp;
 
@@ -21,7 +24,7 @@ pub fn dequantize_and_idct_block<'a>(
 
     // SAFETY This gets fully initialized in the columns loop but since it iterates over columns
     // LLVM does not realize this and elide the initialization
-    let mut temp: [Wrapping<i32>; 64] = unsafe { std::mem::uninitialized() };
+    let mut temp: [MaybeUninit<Wrapping<i32>>; 64] = [MaybeUninit::uninit(); 64];
 
     // columns
     for i in 0..8 {
@@ -34,14 +37,16 @@ pub fn dequantize_and_idct_block<'a>(
             && coefficients[i + 56] == 0
         {
             let dcterm = dequantize(coefficients[i], quantization_table[i]) << 2;
-            temp[i] = dcterm;
-            temp[i + 8] = dcterm;
-            temp[i + 16] = dcterm;
-            temp[i + 24] = dcterm;
-            temp[i + 32] = dcterm;
-            temp[i + 40] = dcterm;
-            temp[i + 48] = dcterm;
-            temp[i + 56] = dcterm;
+            unsafe {
+                temp[i].as_mut_ptr().write(dcterm);
+                temp[i + 8].as_mut_ptr().write(dcterm);
+                temp[i + 16].as_mut_ptr().write(dcterm);
+                temp[i + 24].as_mut_ptr().write(dcterm);
+                temp[i + 32].as_mut_ptr().write(dcterm);
+                temp[i + 40].as_mut_ptr().write(dcterm);
+                temp[i + 48].as_mut_ptr().write(dcterm);
+                temp[i + 56].as_mut_ptr().write(dcterm);
+            }
         } else {
             let s0 = dequantize(coefficients[i], quantization_table[i]);
             let s1 = dequantize(coefficients[i + 8], quantization_table[i + 8]);
@@ -62,16 +67,22 @@ pub fn dequantize_and_idct_block<'a>(
                 Wrapping(512),
             );
 
-            temp[i] = (x0 + t3) >> 10;
-            temp[i + 56] = (x0 - t3) >> 10;
-            temp[i + 8] = (x1 + t2) >> 10;
-            temp[i + 48] = (x1 - t2) >> 10;
-            temp[i + 16] = (x2 + t1) >> 10;
-            temp[i + 40] = (x2 - t1) >> 10;
-            temp[i + 24] = (x3 + t0) >> 10;
-            temp[i + 32] = (x3 - t0) >> 10;
+            unsafe {
+                temp[i].as_mut_ptr().write((x0 + t3) >> 10);
+                temp[i + 56].as_mut_ptr().write((x0 - t3) >> 10);
+                temp[i + 8].as_mut_ptr().write((x1 + t2) >> 10);
+                temp[i + 48].as_mut_ptr().write((x1 - t2) >> 10);
+                temp[i + 16].as_mut_ptr().write((x2 + t1) >> 10);
+                temp[i + 40].as_mut_ptr().write((x2 - t1) >> 10);
+                temp[i + 24].as_mut_ptr().write((x3 + t0) >> 10);
+                temp[i + 32].as_mut_ptr().write((x3 - t0) >> 10);
+            }
         }
     }
+
+    let temp = unsafe {
+        mem::transmute::<&mut [MaybeUninit<Wrapping<i32>>; 64], &mut [Wrapping<i32>; 64]>(&mut temp)
+    };
 
     for (chunk, output_chunk) in temp.chunks_exact(8).zip(output) {
         let chunk = fixed_slice!(chunk; 8);

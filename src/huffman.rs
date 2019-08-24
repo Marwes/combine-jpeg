@@ -124,7 +124,7 @@ impl BaseTable {
         I::Position: Default,
     {
         if input.count() < 16 {
-            input.fill_bits();
+            input.fill_bits()?;
             if input.count() < LUT_BITS {
                 return None;
             }
@@ -194,7 +194,7 @@ impl AcTable {
         I::Position: Default,
     {
         if input.count() < LUT_BITS {
-            input.fill_bits();
+            input.fill_bits().ok_or_else(|| ())?;
             if input.count() < LUT_BITS {
                 return Ok(None);
             }

@@ -2,6 +2,7 @@ use combine::{
     error::ParseError,
     parser::{
         byte::{byte, take_until_byte},
+        combinator::no_partial,
         item::satisfy_map,
         range::take_while1,
         repeat::sep_by1,
@@ -9,6 +10,8 @@ use combine::{
     stream::FullRangeStream,
     Parser,
 };
+
+use crate::Static;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Marker {
@@ -35,9 +38,9 @@ impl Marker {
     pub const APP_ADOBE: Marker = Marker::APP(14);
 }
 
-pub fn marker<'a, I>() -> impl Parser<I, Output = Marker> + 'a
+pub fn marker<'a, I>() -> impl Parser<I, Output = Marker, PartialState = impl Static> + Send
 where
-    I: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
     #[derive(Clone)]
@@ -58,13 +61,17 @@ where
         }
     }
 
-    sep_by1::<Sink, _, _, _>(
+    combine::parser(|input: &mut I| {
+        eprintln!("{}", input.is_partial());
+        Ok(((), combine::error::Consumed::Empty(())))
+    })
+    .with(no_partial(sep_by1::<Sink, _, _, _>(
         (
             take_until_byte(0xFF),      // mozjpeg skips any non marker bytes (non 0xFF)
             take_while1(|b| b == 0xFF), // Extraenous 0xFF bytes are allowed
         ),
         byte(0x00).expected("stuffed zero"), // When we encounter a 0x00, we found a stuffed zero (FF/00) sequence so we search again
-    )
+    )))
     .with(
         satisfy_map(|b| {
             Some(match b {

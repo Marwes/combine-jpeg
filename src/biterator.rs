@@ -5,8 +5,9 @@ use combine::{
     ParseError, Stream,
 };
 
+#[doc(hidden)]
 #[derive(Clone, Debug)]
-pub(crate) struct Biterator<I> {
+pub struct Biterator<I> {
     pub(crate) input: I,
     bits: u64,
     count: u8,
@@ -130,6 +131,10 @@ where
         self.next_bits(1)
             .map(|i| i != 0)
             .ok_or_else(|| StreamErrorFor::<Self>::end_of_input())
+    }
+
+    fn is_partial(&self) -> bool {
+        self.input.is_partial()
     }
 }
 

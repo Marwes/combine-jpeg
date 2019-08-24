@@ -1,6 +1,11 @@
-use combine_jpeg::*;
+use std::{fs, io::BufRead, iter, path::Path};
 
-use std::{fs, iter, path::Path};
+use futures::prelude::*;
+use partial_io::{GenWouldBlock, PartialAsyncRead, PartialOp, PartialWithErrors};
+
+use combine::parser::combinator::{any_partial_state, AnyPartialState};
+
+use combine_jpeg::*;
 
 fn test_decode(name: &str) -> Vec<u8> {
     let in_path = Path::new("tests/images").join(name).with_extension("jpg");
@@ -149,5 +154,151 @@ fn simple() {
             255, 248, 254, 252, 248, 248, 246, 255, 254, 250, 255, 255, 251, 253, 255, 252, 255,
             255, 255
         ]
+    );
+}
+
+struct ReadParser<R> {
+    reader: R,
+    decoder: Decoder,
+    state: AnyPartialState,
+    remaining: Vec<u8>,
+}
+
+impl<R> ReadParser<R>
+where
+    R: BufRead,
+{
+    fn new(reader: R) -> Self {
+        ReadParser {
+            reader,
+            decoder: Decoder::default(),
+            state: Default::default(),
+            remaining: Default::default(),
+        }
+    }
+
+    fn parse_read(&mut self) -> Result<Vec<u8>, String> {
+        loop {
+            let remaining_data = self.remaining.len();
+
+            let (opt, mut removed) = {
+                let buffer = self.reader.fill_buf().map_err(|err| err.to_string())?;
+                if buffer.len() == 0 {
+                    return Err("Could not read enough bytes".into());
+                }
+                let buffer = if !self.remaining.is_empty() {
+                    self.remaining.extend(buffer);
+                    &self.remaining[..]
+                } else {
+                    buffer
+                };
+                let stream = combine_jpeg::DecoderStream::new(
+                    &mut self.decoder,
+                    combine::easy::Stream(combine::stream::PartialStream(buffer)),
+                );
+                match combine::stream::decode(
+                    any_partial_state(combine_jpeg::decode_parser()),
+                    stream,
+                    &mut self.state,
+                ) {
+                    Ok(x) => x,
+                    Err(err) => {
+                        let err = err
+                            .map_position(|pos| pos.translate_position(buffer))
+                            .map_range(|range| format!("{:?}", range))
+                            .to_string();
+                        return Err(format!("parse error: {}", err,));
+                    }
+                }
+            };
+
+            if !self.remaining.is_empty() {
+                // Remove the data we have parsed and adjust `removed` to be the amount of data we
+                // consumed from `self.reader`
+                self.remaining.drain(..removed);
+                if removed >= remaining_data {
+                    removed = removed - remaining_data;
+                } else {
+                    removed = 0;
+                }
+            }
+
+            match opt {
+                Some(value) => {
+                    self.reader.consume(removed);
+                    return Ok(value.map_err(|err| err.to_string())?);
+                }
+                None => {
+                    // We have not enough data to produce a Value but we know that all the data of
+                    // the current buffer are necessary. Consume all the buffered data to ensure
+                    // that the next iteration actually reads more data.
+                    let buffer_len = {
+                        let buffer = self.reader.fill_buf().map_err(|err| err.to_string())?;
+                        if remaining_data == 0 {
+                            self.remaining.extend(&buffer[removed..]);
+                        }
+                        buffer.len()
+                    };
+                    self.reader.consume(buffer_len);
+                }
+            }
+        }
+    }
+}
+
+#[quickcheck_macros::quickcheck]
+fn partial_read(seq: PartialWithErrors<GenWouldBlock>) {
+    let input = fs::read("tests/images/green.jpg").unwrap();
+    let reader = PartialAsyncRead::new(&input[..], seq);
+    let codec = combine_jpeg::DecoderCodec::default();
+    let out = tokio_codec::FramedRead::new(reader, codec)
+        .map(|x| {
+            println!("Decoded `{:?}`", x);
+            x
+        })
+        .collect()
+        .wait()
+        .unwrap();
+
+    assert_eq!(out.len(), 1);
+
+    assert_eq!(
+        out[0],
+        iter::repeat(&[35u8, 177, 77])
+            .take(16 * 8)
+            .flat_map(|xs| &xs[..])
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn simple_partial() {
+    let _ = env_logger::try_init();
+
+    let seq = vec![PartialOp::Limited(
+        40 + 67 + 86 + 82 + 42 + 14 + 23 + 2 + 47 + 55 + 95 + 72,
+    )];
+    let input = fs::read("tests/images/green.jpg").unwrap();
+    let reader = PartialAsyncRead::new(&input[..], seq);
+    let codec = combine_jpeg::DecoderCodec::default();
+    let out = tokio_codec::FramedRead::new(reader, codec)
+        .map(|x| {
+            println!("Decoded `{:?}`", x);
+            x
+        })
+        .collect()
+        .wait()
+        .unwrap();
+
+    assert_eq!(out.len(), 1);
+
+    assert_eq!(
+        out[0],
+        iter::repeat(&[35u8, 177, 77])
+            .take(16 * 8)
+            .flat_map(|xs| &xs[..])
+            .cloned()
+            .collect::<Vec<_>>()
     );
 }

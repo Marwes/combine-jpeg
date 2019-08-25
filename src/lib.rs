@@ -319,7 +319,11 @@ where [
                     huffman::TableClass::new(table_class).ok_or_else(|| {
                         StreamErrorFor::<I>::message_static_message("Invalid huffman table class")
                     })?,
-                    destination,
+                    if usize::from(destination) < MAX_HUFFMAN_TABLES {
+                        destination
+                    } else {
+                        return Err(StreamErrorFor::<I>::message_static_message("Invalid DHT destination identifier"))
+                    },
                 ))
             },
         ),
@@ -455,7 +459,11 @@ where [
                 DQTPrecision::new(precision).ok_or_else(|| {
                     StreamErrorFor::<I>::message_static_message("Unexpected DQT precision")
                 })?,
-                identifier,
+                if usize::from(identifier) < MAX_QUANTIZATION_TABLES {
+                    identifier
+                } else {
+                    return Err(StreamErrorFor::<I>::message_static_message("Invalid DQT destination identifier"))
+                },
             ))
         })
         .then_partial(|&mut (precision, identifier)| match precision {
@@ -846,7 +854,7 @@ impl<'s, I> DecoderStream<'s, I> {
 #[doc(hidden)]
 pub type BiteratorStream<'s, I> = StateStream<Biterator<I>, &'s mut Decoder>;
 
-pub trait Static: Send + Default + 'static {}
+trait Static: Send + Default + 'static {}
 
 impl<T> Static for T where T: Send + Default + 'static {}
 
@@ -878,13 +886,16 @@ where [
 }
 }
 
+const MAX_HUFFMAN_TABLES: usize = 4;
+const MAX_QUANTIZATION_TABLES: usize = 4;
+
 #[derive(Default)]
 pub struct Decoder {
     pub frame: Option<Frame>,
     scan: Option<Scan>,
-    ac_huffman_tables: [Option<huffman::AcTable>; 16],
-    dc_huffman_tables: [Option<huffman::DcTable>; 16],
-    quantization_tables: [Option<QuantizationTable>; 4],
+    ac_huffman_tables: [Option<huffman::AcTable>; MAX_HUFFMAN_TABLES],
+    dc_huffman_tables: [Option<huffman::DcTable>; MAX_HUFFMAN_TABLES],
+    quantization_tables: [Option<QuantizationTable>; MAX_QUANTIZATION_TABLES],
     planes: ComponentVec<Vec<u8>>,
     color_transform: Option<AdobeColorTransform>,
     restart_interval: u16,

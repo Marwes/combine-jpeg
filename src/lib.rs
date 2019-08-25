@@ -1,15 +1,6 @@
-use std::{
-    fmt,
-    io::{self, BufRead},
-    mem,
-};
+use std::{fmt, io::BufRead, mem};
 
-use {
-    arrayvec::ArrayVec,
-    bytes::BytesMut,
-    derive_more::{Display, From},
-    itertools::izip,
-};
+use {arrayvec::ArrayVec, bytes::BytesMut, itertools::izip};
 
 use combine::{
     attempt, dispatch, easy,
@@ -27,13 +18,15 @@ use combine::{
         user_state::StateStream, FullRangeStream, PartialStream, Positioned, ResetStream,
         StreamErrorFor,
     },
-    ParseResult, Parser, RangeStreamOnce, Stream, StreamOnce,
+    ParseResult, Parser, Stream, StreamOnce,
 };
 
-use {
-    biterator::Biterator,
+use crate::{
     marker::{marker, Marker},
+    stream::{decoder_stream, BiteratorStream, DecoderStream},
 };
+
+pub use crate::error::{Error, IoError, UnsupportedFeature};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -61,37 +54,12 @@ macro_rules! fixed_slice_mut {
 mod biterator;
 mod clamp;
 mod color_conversion;
+mod error;
 mod huffman;
 mod idct;
 mod marker;
+mod stream;
 mod upsampler;
-
-#[derive(Debug, PartialEq, Eq, Display)]
-pub enum UnsupportedFeature {
-    NonIntegerSubsamplingRatio,
-}
-
-#[derive(Debug, PartialEq, Display, From)]
-pub enum Error {
-    #[display(fmt = "{}", _0)]
-    Unsupported(UnsupportedFeature),
-
-    #[display(fmt = "{}", _0)]
-    Parse(easy::Errors<String, String, usize>),
-
-    #[display(fmt = "{}", _0)]
-    Format(String),
-
-    #[display(fmt = "{}", _0)]
-    Message(&'static str),
-}
-
-// FIXME
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::Format(err.to_string())
-    }
-}
 
 pub trait FromBytes<'a> {
     fn from_bytes(bs: &'a [u8]) -> Self;
@@ -749,118 +717,6 @@ where [
 }
 }
 
-#[repr(transparent)]
-pub struct DecoderStream<'s, I>(BiteratorStream<'s, I>);
-
-fn decoder_stream<'s, 't, I>(s: &'t mut BiteratorStream<'s, I>) -> &'t mut DecoderStream<'s, I> {
-    // SAFETY repr(transparent) is defined on `DecoderStream`
-    unsafe { mem::transmute(s) }
-}
-
-impl<'s, I> std::ops::Deref for DecoderStream<'s, I> {
-    type Target = BiteratorStream<'s, I>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'s, I> std::ops::DerefMut for DecoderStream<'s, I> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<'s, I> StreamOnce for DecoderStream<'s, I>
-where
-    I: Send + StreamOnce,
-{
-    type Item = I::Item;
-    type Range = I::Range;
-    type Position = I::Position;
-    type Error = I::Error;
-
-    #[inline]
-    fn uncons(&mut self) -> Result<I::Item, StreamErrorFor<Self>> {
-        self.0.stream.as_inner_mut().uncons()
-    }
-
-    fn is_partial(&self) -> bool {
-        self.0.stream.as_inner().is_partial()
-    }
-}
-
-impl<'s, I> ResetStream for DecoderStream<'s, I>
-where
-    I: Send + ResetStream,
-{
-    type Checkpoint = I::Checkpoint;
-
-    fn checkpoint(&self) -> Self::Checkpoint {
-        self.0.stream.as_inner().checkpoint()
-    }
-
-    fn reset(&mut self, checkpoint: Self::Checkpoint) -> Result<(), Self::Error> {
-        self.0.stream.as_inner_mut().reset(checkpoint)
-    }
-}
-
-impl<'s, I> RangeStreamOnce for DecoderStream<'s, I>
-where
-    I: Send + RangeStreamOnce,
-{
-    fn uncons_range(&mut self, size: usize) -> Result<Self::Range, StreamErrorFor<Self>> {
-        self.stream.as_inner_mut().uncons_range(size)
-    }
-
-    fn uncons_while<F>(&mut self, f: F) -> Result<Self::Range, StreamErrorFor<Self>>
-    where
-        F: FnMut(Self::Item) -> bool,
-    {
-        self.stream.as_inner_mut().uncons_while(f)
-    }
-
-    fn uncons_while1<F>(&mut self, f: F) -> ParseResult<Self::Range, StreamErrorFor<Self>>
-    where
-        F: FnMut(Self::Item) -> bool,
-    {
-        self.stream.as_inner_mut().uncons_while1(f)
-    }
-
-    fn distance(&self, end: &Self::Checkpoint) -> usize {
-        self.stream.as_inner().distance(end)
-    }
-}
-
-impl<'s, I> FullRangeStream for DecoderStream<'s, I>
-where
-    I: Send + FullRangeStream,
-{
-    fn range(&self) -> Self::Range {
-        self.stream.as_inner().range()
-    }
-}
-
-impl<'s, I> Positioned for DecoderStream<'s, I>
-where
-    I: Send + Positioned,
-{
-    fn position(&self) -> Self::Position {
-        self.0.stream.as_inner().position()
-    }
-}
-
-impl<'s, I> DecoderStream<'s, I> {
-    pub fn new(state: &'s mut Decoder, stream: I) -> Self {
-        DecoderStream(BiteratorStream {
-            state,
-            stream: Biterator::new(stream),
-        })
-    }
-}
-
-#[doc(hidden)]
-pub type BiteratorStream<'s, I> = StateStream<Biterator<I>, &'s mut Decoder>;
-
 trait Static: Send + Default + 'static {}
 
 impl<T> Static for T where T: Send + Default + 'static {}
@@ -1051,14 +907,15 @@ impl Decoder {
             }
         }
 
-        let block_offset = (usize::from(block_y) * usize::from(component.block_size.width)
-            + usize::from(block_x))
-            * 64;
-        let mcu_row_offset = usize::from(mcu_y)
-            * usize::from(component.block_size.width)
-            * usize::from(component.vertical_sampling_factor)
-            * 64;
         let coefficients = if produce_data {
+            let block_offset = (usize::from(block_y) * usize::from(component.block_size.width)
+                + usize::from(block_x))
+                * 64;
+            let mcu_row_offset = usize::from(mcu_y)
+                * usize::from(component.block_size.width)
+                * usize::from(component.vertical_sampling_factor)
+                * 64;
+
             let start = block_offset - mcu_row_offset;
             let row_coefficients = &mut input.state.scan_state.mcu_row_coefficients[i];
             fixed_slice_mut!(&mut row_coefficients[start..start + 64]; 64)
@@ -1254,6 +1111,9 @@ where [
                                 );
 
                                 if result.is_err() {
+                                    // We might fail because we were out of input so reset the
+                                    // stream until before we started the decode so it can be
+                                    // retried
                                     Result::from(input.reset(checkpoint)).ok().unwrap();
                                 }
 
@@ -1637,7 +1497,7 @@ impl DecoderCodec {
 
 impl tokio_codec::Decoder for DecoderCodec {
     type Item = Vec<u8>;
-    type Error = Error;
+    type Error = IoError;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if buf.is_empty() {
@@ -1686,7 +1546,7 @@ where
         }
     }
 
-    pub fn decode(&mut self) -> Result<Vec<u8>, Error> {
+    pub fn decode(&mut self) -> Result<Vec<u8>, IoError> {
         loop {
             let remaining_data = self.remaining.len();
 
@@ -1731,14 +1591,14 @@ where
             match opt {
                 Some(value) => {
                     self.reader.consume(removed);
-                    return Ok(value.map_err(|err| err.to_string())?);
+                    return Ok(value?);
                 }
                 None => {
                     // We have not enough data to produce a Value but we know that all the data of
                     // the current buffer are necessary. Consume all the buffered data to ensure
                     // that the next iteration actually reads more data.
                     let buffer_len = {
-                        let buffer = self.reader.fill_buf().map_err(|err| err.to_string())?;
+                        let buffer = self.reader.fill_buf()?;
                         if remaining_data == 0 {
                             self.remaining.extend(&buffer[removed..]);
                         }

@@ -216,9 +216,7 @@ fn partial_sync_read_simple(seq: PartialWithErrors<GenNoErrors>) {
 fn simple_partial() {
     let _ = env_logger::try_init();
 
-    let seq = vec![PartialOp::Limited(
-        40 + 67 + 86 + 82 + 42 + 14 + 23 + 2 + 47 + 55 + 95 + 72,
-    )];
+    let seq = vec![];
     let input = fs::read("tests/images/green.jpg").unwrap();
     let reader = PartialAsyncRead::new(&input[..], seq);
     let codec = combine_jpeg::DecoderCodec::default();
@@ -233,12 +231,5 @@ fn simple_partial() {
 
     assert_eq!(out.len(), 1);
 
-    assert_eq!(
-        out[0],
-        iter::repeat(&[35u8, 177, 77])
-            .take(16 * 8)
-            .flat_map(|xs| &xs[..])
-            .cloned()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(out[0], &EXPECTED_SIMPLE[..]);
 }

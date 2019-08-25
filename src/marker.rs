@@ -1,17 +1,15 @@
 use combine::{
     error::ParseError,
+    parser,
     parser::{
         byte::{byte, take_until_byte},
-        combinator::no_partial,
+        combinator::{any_send_partial_state, AnySendPartialState},
         item::satisfy_map,
         range::take_while1,
         repeat::sep_by1,
     },
     stream::FullRangeStream,
-    Parser,
 };
-
-use crate::Static;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Marker {
@@ -38,36 +36,40 @@ impl Marker {
     pub const APP_ADOBE: Marker = Marker::APP(14);
 }
 
-pub fn marker<'a, I>() -> impl Parser<I, Output = Marker, PartialState = impl Static> + Send
-where
+#[derive(Clone)]
+pub struct Sink;
+
+impl Default for Sink {
+    fn default() -> Self {
+        Sink
+    }
+}
+
+impl<A> Extend<A> for Sink {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = A>,
+    {
+        iter.into_iter().for_each(|_| ())
+    }
+}
+
+parser! {
+pub struct MarkerParser;
+type PartialState = AnySendPartialState;
+pub fn marker['a, I]()(I) -> Marker
+where [
     I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Item, I::Range, I::Position>,
+]
 {
-    #[derive(Clone)]
-    pub struct Sink;
-
-    impl Default for Sink {
-        fn default() -> Self {
-            Sink
-        }
-    }
-
-    impl<A> Extend<A> for Sink {
-        fn extend<T>(&mut self, iter: T)
-        where
-            T: IntoIterator<Item = A>,
-        {
-            iter.into_iter().for_each(|_| ())
-        }
-    }
-
-    no_partial(sep_by1::<Sink, _, _, _>(
+    any_send_partial_state(sep_by1::<Sink, _, _, _>(
         (
-            take_until_byte(0xFF),      // mozjpeg skips any non marker bytes (non 0xFF)
-            take_while1(|b| b == 0xFF), // Extraenous 0xFF bytes are allowed
+            take_until_byte(0xFF).map(|_| ()),      // mozjpeg skips any non marker bytes (non 0xFF)
+            take_while1(|b| b == 0xFF).map(|_| ()), // Extraenous 0xFF bytes are allowed
         ),
         byte(0x00).expected("stuffed zero"), // When we encounter a 0x00, we found a stuffed zero (FF/00) sequence so we search again
-    ))
+    )
     .with(
         satisfy_map(|b| {
             Some(match b {
@@ -85,5 +87,6 @@ where
             })
         })
         .expected("marker"),
-    )
+    ))
+}
 }

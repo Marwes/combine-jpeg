@@ -13,7 +13,7 @@ use combine::{
     parser,
     parser::{
         byte::num::be_u16,
-        combinator::{any_send_partial_state, factory, no_partial, AnySendPartialState},
+        combinator::{any_send_partial_state, factory, AnySendPartialState},
         item::{any, eof, satisfy, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, iterate, repeat_skip_until},
@@ -1449,7 +1449,7 @@ where [
                 input.state.scan_state.mcus_left_until_restart -= 1;
 
                 if input.state.scan_state.mcus_left_until_restart == 0 && !is_last_mcu {
-                    no_partial(marker().then(handle_marker)).left()
+                    marker().then_partial(move |&mut marker| handle_marker(marker)).left()
                 } else {
                     value(()).right()
                 }
@@ -1479,13 +1479,13 @@ where [
 ]
 {
     any_send_partial_state(repeat_skip_until(
-            no_partial(marker()).then_partial(move |&mut marker| do_segment(marker)),
-            attempt(no_partial(marker()).and_then(|marker| match marker {
+            marker().then_partial(move |&mut marker| do_segment(marker)),
+            attempt(marker().and_then(|marker| match marker {
                 Marker::EOI => Ok(()),
                 _ => Err(StreamErrorFor::<DecoderStream<I>>::message_static_message(""))
             }))
         )
-        .skip(no_partial(marker())) // EOI Marker
+        .skip(marker()) // EOI Marker
         .map_input(|_, input: &mut DecoderStream<'s, I>| {
             let is_jfif = false; // TODO
 

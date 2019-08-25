@@ -87,7 +87,7 @@ where
             let checkpoint = self.checkpoint();
             let b = match self.input.uncons().ok()? {
                 0xFF => {
-                    if self.input.uncons().ok() == Some(0x00) {
+                    if self.input.uncons().ok()? == 0x00 {
                         0xFF
                     } else {
                         ResetStream::reset(self, checkpoint).ok()?;

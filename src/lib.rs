@@ -880,11 +880,19 @@ impl Decoder {
         I::Position: Default + fmt::Display,
         's: 'a,
     {
+        dbg!(
+            &input.stream.as_inner().range(),
+            mcu_x,
+            mcu_y,
+            i,
+            j,
+            blocks_per_mcu,
+            produce_data,
+        );
         let frame = input.state.frame.as_ref().unwrap();
         let scan = input.state.scan.as_ref().unwrap();
 
         let component = &frame.components[i];
-        let dc_predictor = &mut input.state.scan_state.dc_predictors[i];
         let scan_header = &scan.headers[i];
 
         let (block_x, block_y);
@@ -940,7 +948,7 @@ impl Decoder {
                 &ac_table,
                 &mut input.stream,
                 &mut input.state.scan_state.eob_run,
-                dc_predictor,
+                &mut input.state.scan_state.dc_predictors[i],
             )
             .map(|()| ((), Consumed::Consumed(())))
             .map_err(|err| {
@@ -1100,6 +1108,8 @@ where [
                         iterate::<(), _, _, _, _>(0..u16::from(blocks_per_mcu), move |&j, _| {
                             parser(move |input: &mut BiteratorStream<'s, I>| {
                                 let checkpoint = input.checkpoint();
+                                let dc_predictor = input.state.scan_state.dc_predictors[i];
+                                let eob_run = input.state.scan_state.eob_run;
                                 let result = Decoder::decode_block_at(
                                     input,
                                     mcu_x,
@@ -1111,6 +1121,9 @@ where [
                                 );
 
                                 if result.is_err() {
+                                    input.state.scan_state.dc_predictors[i] = dc_predictor;
+                                    input.state.scan_state.eob_run = eob_run;
+
                                     // We might fail because we were out of input so reset the
                                     // stream until before we started the decode so it can be
                                     // retried
@@ -1503,6 +1516,7 @@ impl tokio_codec::Decoder for DecoderCodec {
         if buf.is_empty() {
             return Ok(None);
         }
+        log::trace!("Decode: {:?}", buf);
 
         let Self { decoder, state } = self;
         let input = &buf[..];
@@ -1518,6 +1532,8 @@ impl tokio_codec::Decoder for DecoderCodec {
             })?;
 
         buf.advance(consumed);
+
+        log::trace!("Consumed: {} {:?}", consumed, buf);
 
         match item {
             Some(result) => Ok(Some(result?)),

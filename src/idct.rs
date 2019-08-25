@@ -64,7 +64,7 @@ pub fn dequantize_and_idct_block<'a>(
                 [s0, s1, s2, s3, s4, s5, s6, s7],
                 // constants scaled things up by 1<<12; let's bring them back
                 // down, but keep 2 extra bits of precision
-                Wrapping(512),
+                512,
             );
 
             unsafe {
@@ -80,6 +80,7 @@ pub fn dequantize_and_idct_block<'a>(
         }
     }
 
+    // SAFTY `temp` was initialized by the previous loop
     let temp = unsafe {
         mem::transmute::<&mut [MaybeUninit<Wrapping<i32>>; 64], &mut [Wrapping<i32>; 64]>(&mut temp)
     };
@@ -93,11 +94,11 @@ pub fn dequantize_and_idct_block<'a>(
         // so we want to round that, which means adding 0.5 * 1<<17,
         // aka 65536. Also, we'll end up with -128 to 127 that we want
         // to encode as 0..255 by adding 128, so we'll add that before the shift
-        const X_SCALE: Wrapping<i32> = Wrapping(65536 + (128 << 17));
+        const X_SCALE: i32 = 65536 + (128 << 17);
 
         let [s0, s1, s2, s3, s4, s5, s6, s7] = *chunk;
         if s1.0 == 0 && s2.0 == 0 && s3.0 == 0 && s4.0 == 0 && s5.0 == 0 && s6.0 == 0 && s7.0 == 0 {
-            let dcterm = stbi_clamp((stbi_fsh(s0) + X_SCALE) >> 17);
+            let dcterm = stbi_clamp((stbi_fsh(s0) + Wrapping(X_SCALE)) >> 17);
             output_chunk[0] = dcterm;
             output_chunk[1] = dcterm;
             output_chunk[2] = dcterm;
@@ -129,76 +130,84 @@ struct Kernel {
     ts: [Wrapping<i32>; 4],
 }
 
-#[inline(always)]
-fn kernel([s0, s1, s2, s3, s4, s5, s6, s7]: [Wrapping<i32>; 8], x_scale: Wrapping<i32>) -> Kernel {
+#[inline]
+fn kernel_x([s0, s2, s4, s6]: [Wrapping<i32>; 4], x_scale: i32) -> [Wrapping<i32>; 4] {
     // Even `chunk` indicies
-    let (x0, x1, x2, x3);
+    let (t2, t3);
     {
-        let (t2, t3);
-        {
-            let p2 = s2;
-            let p3 = s6;
+        let p2 = s2;
+        let p3 = s6;
 
-            let p1 = (p2 + p3) * stbi_f2f(0.5411961);
-            t2 = p1 + p3 * stbi_f2f(-1.847759065);
-            t3 = p1 + p2 * stbi_f2f(0.765366865);
-        }
-
-        let (t0, t1);
-        {
-            let p2 = s0;
-            let p3 = s4;
-
-            t0 = stbi_fsh(p2 + p3);
-            t1 = stbi_fsh(p2 - p3);
-        }
-
-        x0 = t0 + t3;
-        x3 = t0 - t3;
-        x1 = t1 + t2;
-        x2 = t1 - t2;
+        let p1 = (p2 + p3) * stbi_f2f(0.5411961);
+        t2 = p1 + p3 * stbi_f2f(-1.847759065);
+        t3 = p1 + p2 * stbi_f2f(0.765366865);
     }
 
+    let (t0, t1);
+    {
+        let p2 = s0;
+        let p3 = s4;
+
+        t0 = stbi_fsh(p2 + p3);
+        t1 = stbi_fsh(p2 - p3);
+    }
+
+    let x0 = t0 + t3;
+    let x3 = t0 - t3;
+    let x1 = t1 + t2;
+    let x2 = t1 - t2;
+
+    let x_scale = Wrapping(x_scale);
+
+    [x0 + x_scale, x1 + x_scale, x2 + x_scale, x3 + x_scale]
+}
+
+#[inline]
+fn kernel_t([s1, s3, s5, s7]: [Wrapping<i32>; 4]) -> [Wrapping<i32>; 4] {
     // Odd `chunk` indicies
-    let (mut t0, mut t1, mut t2, mut t3);
-    {
-        t0 = s7;
-        t1 = s5;
-        t2 = s3;
-        t3 = s1;
+    let mut t0 = s7;
+    let mut t1 = s5;
+    let mut t2 = s3;
+    let mut t3 = s1;
 
-        let p3 = t0 + t2;
-        let p4 = t1 + t3;
-        let p1 = t0 + t3;
-        let p2 = t1 + t2;
-        let p5 = (p3 + p4) * stbi_f2f(1.175875602);
+    let p3 = t0 + t2;
+    let p4 = t1 + t3;
+    let p1 = t0 + t3;
+    let p2 = t1 + t2;
+    let p5 = (p3 + p4) * stbi_f2f(1.175875602);
 
-        t0 *= stbi_f2f(0.298631336);
-        t1 *= stbi_f2f(2.053119869);
-        t2 *= stbi_f2f(3.072711026);
-        t3 *= stbi_f2f(1.501321110);
+    t0 *= stbi_f2f(0.298631336);
+    t1 *= stbi_f2f(2.053119869);
+    t2 *= stbi_f2f(3.072711026);
+    t3 *= stbi_f2f(1.501321110);
 
-        let p1 = p5 + p1 * stbi_f2f(-0.899976223);
-        let p2 = p5 + p2 * stbi_f2f(-2.562915447);
-        let p3 = p3 * stbi_f2f(-1.961570560);
-        let p4 = p4 * stbi_f2f(-0.390180644);
+    let p1 = p5 + p1 * stbi_f2f(-0.899976223);
+    let p2 = p5 + p2 * stbi_f2f(-2.562915447);
+    let p3 = p3 * stbi_f2f(-1.961570560);
+    let p4 = p4 * stbi_f2f(-0.390180644);
 
-        t3 += p1 + p4;
-        t2 += p2 + p3;
-        t1 += p2 + p4;
-        t0 += p1 + p3;
-    }
+    t3 += p1 + p4;
+    t2 += p2 + p3;
+    t1 += p2 + p4;
+    t0 += p1 + p3;
 
+    [t0, t1, t2, t3]
+}
+
+#[inline]
+fn kernel([s0, s1, s2, s3, s4, s5, s6, s7]: [Wrapping<i32>; 8], x_scale: i32) -> Kernel {
     Kernel {
-        xs: [x0 + x_scale, x1 + x_scale, x2 + x_scale, x3 + x_scale],
-        ts: [t0, t1, t2, t3],
+        xs: kernel_x([s0, s2, s4, s6], x_scale),
+        ts: kernel_t([s1, s3, s5, s7]),
     }
 }
 
+#[inline]
 fn stbi_f2f(x: f32) -> Wrapping<i32> {
     Wrapping((x * 4096.0 + 0.5) as i32)
 }
 
+#[inline]
 const fn stbi_fsh(x: Wrapping<i32>) -> Wrapping<i32> {
     Wrapping(x.0 << 12)
 }

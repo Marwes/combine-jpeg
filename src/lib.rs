@@ -35,6 +35,9 @@ use {
     marker::{marker, Marker},
 };
 
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
 macro_rules! fixed_slice {
     ($expr: expr; $len: tt) => {{
         fn fixed_array<T>(xs: &[T]) -> &[T; $len] {
@@ -954,23 +957,26 @@ impl Decoder {
 
     fn dequantize(&mut self) {
         let frame = self.frame.as_ref().unwrap();
+        let coding_process = frame.coding_process();
+        let quantization_tables = &self.quantization_tables;
+        let mcu_row_coefficients = &self.scan_state.mcu_row_coefficients;
 
-        for (component_index, (component, offset, result)) in izip!(
+        izip!(
             &frame.components,
             &mut self.scan_state.offsets,
             &mut self.scan_state.results
         )
         .enumerate()
-        {
-            let row_coefficients = if frame.coding_process() == CodingProcess::Progressive {
+        .for_each(|(component_index, (component, offset, result))| {
+            let row_coefficients = if coding_process == CodingProcess::Progressive {
                 unimplemented!()
             } else {
-                &self.scan_state.mcu_row_coefficients[component_index][..]
+                &mcu_row_coefficients[component_index][..]
             };
 
             // Convert coefficients from a MCU row to samples.
 
-            let quantization_table = self.quantization_tables
+            let quantization_table = quantization_tables
                 [usize::from(component.quantization_table_destination_selector)]
             .as_ref()
             .unwrap_or_else(|| {
@@ -1000,7 +1006,7 @@ impl Decoder {
             }
 
             *offset += row_coefficients.len();
-        }
+        })
     }
 
     fn decode_block_at<'a, 's, I>(
@@ -1516,7 +1522,7 @@ where [
                 is_jfif,
                 input.state.color_transform,
             )?;
-            let mut upsampler = upsampler::Upsampler::new(
+            let upsampler = upsampler::Upsampler::new(
                 &frame.components,
                 frame.samples_per_line,
                 frame.lines,
@@ -1524,12 +1530,36 @@ where [
             let line_size = width * frame.components.len();
             let mut image = vec![0u8; line_size * height];
 
-            for (row, line) in image.chunks_mut(line_size).enumerate() {
+
+            let f = |line_buffers: &mut ComponentVec<_>, row: usize, line: &mut [u8]| {
                 let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
-                colors.extend(upsampler.upsample_and_interleave_row(data, row, width));
+                colors.extend(upsampler.upsample_and_interleave_row(line_buffers, data, row, width));
 
                 color_convert_func(line, &colors);
+            };
+
+            let mut line_buffers =  ComponentVec::new();
+            line_buffers.extend(std::iter::repeat(Vec::new()).take(4));
+
+            #[cfg(not(feature = "rayon"))]
+            {
+                image
+                    .chunks_mut(line_size)
+                    .enumerate()
+                    .for_each(|(row, line)| f(&mut line_buffers, row, line));
             }
+
+            #[cfg(feature = "rayon")]
+            {
+                image
+                    .par_chunks_mut(line_size)
+                    .enumerate()
+                    .for_each_with(line_buffers, |line_buffers, (row, line)| {
+                        f(line_buffers, row, line);
+                    });
+            }
+
+
             Ok(image)
         }))
 }

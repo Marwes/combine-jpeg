@@ -1,7 +1,9 @@
-use crate::{Component, Error, Result, UnsupportedFeature};
+use crate::{Component, ComponentVec, Error, Result, UnsupportedFeature};
+
+use itertools::izip;
 
 pub(crate) struct Upsampler {
-    components: Vec<UpsamplerComponent>,
+    components: ComponentVec<UpsamplerComponent>,
 }
 
 struct UpsamplerComponent {
@@ -9,7 +11,6 @@ struct UpsamplerComponent {
     width: usize,
     height: usize,
     row_stride: usize,
-    line_buffer: Vec<u8>,
 }
 
 impl Upsampler {
@@ -28,33 +29,33 @@ impl Upsampler {
             .map(|c| c.vertical_sampling_factor)
             .max()
             .unwrap();
-        let mut upsampler_components = Vec::with_capacity(components.len());
-
-        for component in components {
-            let upsampler = choose_upsampler(
-                (
-                    component.horizontal_sampling_factor,
-                    component.vertical_sampling_factor,
-                ),
-                (h_max, v_max),
-                output_width,
-                output_height,
-            )?;
-            upsampler_components.push(UpsamplerComponent {
-                upsampler: upsampler,
-                width: component.size.width as usize,
-                height: component.size.height as usize,
-                row_stride: component.block_size.width as usize * 8,
-                line_buffer: Vec::new(),
-            });
-        }
         Ok(Upsampler {
-            components: upsampler_components,
+            components: components
+                .iter()
+                .map(|component| {
+                    let upsampler = choose_upsampler(
+                        (
+                            component.horizontal_sampling_factor,
+                            component.vertical_sampling_factor,
+                        ),
+                        (h_max, v_max),
+                        output_width,
+                        output_height,
+                    )?;
+                    Ok(UpsamplerComponent {
+                        upsampler: upsampler,
+                        width: component.size.width as usize,
+                        height: component.size.height as usize,
+                        row_stride: component.block_size.width as usize * 8,
+                    })
+                })
+                .collect::<Result<_>>()?,
         })
     }
 
     pub fn upsample_and_interleave_row<'s>(
-        &'s mut self,
+        &'s self,
+        line_buffers: &'s mut ComponentVec<Vec<u8>>,
         component_data: &'s [Vec<u8>],
         row: usize,
         output_width: usize,
@@ -63,10 +64,8 @@ impl Upsampler {
 
         debug_assert_eq!(component_count, self.components.len());
 
-        self.components
-            .iter_mut()
-            .zip(component_data)
-            .map(move |(component, data)| {
+        izip!(&self.components, component_data, line_buffers).map(
+            move |(component, data, line_buffer)| {
                 component.upsampler.upsample_row(
                     data,
                     component.width,
@@ -74,9 +73,10 @@ impl Upsampler {
                     component.row_stride,
                     row,
                     output_width,
-                    &mut component.line_buffer,
+                    line_buffer,
                 )
-            })
+            },
+        )
     }
 }
 
@@ -125,7 +125,7 @@ fn choose_upsampler(
     }
 }
 
-trait Upsample {
+trait Upsample: Send + Sync {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],

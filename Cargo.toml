@@ -13,6 +13,7 @@ combine = { version = "4.0.0-alpha.1", path = "../combine" }
 derive_more = "0.15"
 itertools = "0.8"
 log = "0.4"
+rayon = { version = "1", optional = true }
 
 bytes = "0.4"
 tokio-io = "0.1"
@@ -21,13 +22,15 @@ tokio-codec = "0.1"
 [dev-dependencies]
 criterion = { version = "0.2", default-features = false }
 env_logger = "0.6"
-image = "0.21"
-mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
+image = { version = "0.21", default-features = false, features = ["png"] }
 partial-io = { version = "0.3", features = ["quickcheck", "tokio"] }
 quickcheck = "0.6"
 quickcheck_macros = "0.8"
 futures = "0.1"
 tokio = "0.1"
+
+mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
+jpeg-decoder = { version = "0.1", default-features = false } # Disable multithreaded decoding since no other decoder uses it 
 
 [[bench]]
 name = "basic"

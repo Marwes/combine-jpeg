@@ -46,11 +46,24 @@ fn it_works_mozjpeg(b: &mut Bencher) {
     })
 }
 
+fn it_works_jpeg_decoder(b: &mut Bencher) {
+    let name = "img0.jpg";
+    let input = fs::read(Path::new(name))
+        .unwrap_or_else(|err| panic!("Can't read image {}: {}", name, err));
+
+    b.iter(|| {
+        let mut decoder = jpeg_decoder::Decoder::new(black_box(&input[..]));
+        let out = decoder.decode().unwrap();
+        out
+    })
+}
+
 fn decode_group(c: &mut Criterion) {
     c.bench(
         "it_works",
         Benchmark::new("combine", it_works)
             .with_function("mozjpeg", it_works_mozjpeg)
+            .with_function("jpeg-decoder", it_works_jpeg_decoder)
             .sample_size(20),
     );
     c.bench_function("green", green);

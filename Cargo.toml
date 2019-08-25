@@ -2,9 +2,10 @@
 name = "combine-jpeg"
 version = "0.1.0"
 authors = ["Markus Westerlind <marwes91@gmail.com>"]
+description = "JPEG decoder implementation"
+readme = "README.md"
+license = "MIT / Apache-2.0"
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 arrayvec = "0.4"

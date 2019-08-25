@@ -1,4 +1,8 @@
-use std::{fmt, io, mem};
+use std::{
+    fmt,
+    io::{self, BufRead},
+    mem,
+};
 
 use {
     arrayvec::ArrayVec,
@@ -1628,6 +1632,91 @@ impl tokio_codec::Decoder for DecoderCodec {
         match item {
             Some(result) => Ok(Some(result?)),
             None => Ok(None),
+        }
+    }
+}
+
+pub struct ReadDecoder<R> {
+    reader: R,
+    decoder: Decoder,
+    state: AnySendPartialState,
+    remaining: Vec<u8>,
+}
+
+impl<R> ReadDecoder<R>
+where
+    R: BufRead,
+{
+    pub fn new(reader: R) -> Self {
+        ReadDecoder {
+            reader,
+            decoder: Decoder::default(),
+            state: Default::default(),
+            remaining: Default::default(),
+        }
+    }
+
+    pub fn decode(&mut self) -> Result<Vec<u8>, Error> {
+        loop {
+            let remaining_data = self.remaining.len();
+
+            let (opt, mut removed) = {
+                let buffer = self.reader.fill_buf()?;
+                if buffer.len() == 0 {
+                    return Err("Could not read enough bytes".into());
+                }
+                let buffer = if !self.remaining.is_empty() {
+                    self.remaining.extend(buffer);
+                    &self.remaining[..]
+                } else {
+                    buffer
+                };
+                let stream = DecoderStream::new(
+                    &mut self.decoder,
+                    combine::easy::Stream(combine::stream::PartialStream(buffer)),
+                );
+                match combine::stream::decode(decode_parser(), stream, &mut self.state) {
+                    Ok(x) => x,
+                    Err(err) => {
+                        return Err(err
+                            .map_position(|pos| pos.translate_position(buffer))
+                            .map_token(|token| format!("0x{:X}", token))
+                            .map_range(|range| format!("{:?}", range))
+                            .into());
+                    }
+                }
+            };
+
+            if !self.remaining.is_empty() {
+                // Remove the data we have parsed and adjust `removed` to be the amount of data we
+                // consumed from `self.reader`
+                self.remaining.drain(..removed);
+                if removed >= remaining_data {
+                    removed = removed - remaining_data;
+                } else {
+                    removed = 0;
+                }
+            }
+
+            match opt {
+                Some(value) => {
+                    self.reader.consume(removed);
+                    return Ok(value.map_err(|err| err.to_string())?);
+                }
+                None => {
+                    // We have not enough data to produce a Value but we know that all the data of
+                    // the current buffer are necessary. Consume all the buffered data to ensure
+                    // that the next iteration actually reads more data.
+                    let buffer_len = {
+                        let buffer = self.reader.fill_buf().map_err(|err| err.to_string())?;
+                        if remaining_data == 0 {
+                            self.remaining.extend(&buffer[removed..]);
+                        }
+                        buffer.len()
+                    };
+                    self.reader.consume(buffer_len);
+                }
+            }
         }
     }
 }

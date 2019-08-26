@@ -114,9 +114,13 @@ where
 
 impl<'s, I> DecoderStream<'s, I> {
     pub fn new(state: &'s mut Decoder, stream: I) -> Self {
+        Self::with_state(state, stream, 0, 0)
+    }
+
+    pub fn with_state(state: &'s mut Decoder, stream: I, bits: u64, count: u8) -> Self {
         DecoderStream(BiteratorStream {
             state,
-            stream: Biterator::new(stream),
+            stream: Biterator::with_state(stream, bits, count),
         })
     }
 }

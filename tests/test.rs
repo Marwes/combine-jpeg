@@ -216,8 +216,10 @@ fn partial_sync_read_simple(seq: PartialWithErrors<GenNoErrors>) {
 fn simple_partial() {
     let _ = env_logger::try_init();
 
-    let seq = vec![];
-    let input = fs::read("tests/images/green.jpg").unwrap();
+    let seq = vec![PartialOp::Limited(
+        16 + 75 + 75 + 72 + 80 + 87 + 69 + 99 + 68 + 37 + 89 + 61,
+    )];
+    let input = fs::read("tests/images/simple.jpg").unwrap();
     let reader = PartialAsyncRead::new(&input[..], seq);
     let codec = combine_jpeg::DecoderCodec::default();
     let out = tokio_codec::FramedRead::new(reader, codec)

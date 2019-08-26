@@ -9,17 +9,17 @@ use combine::{
 #[derive(Clone, Debug)]
 pub struct Biterator<I> {
     pub(crate) input: I,
-    bits: u64,
-    count: u8,
+    pub(crate) bits: u64,
+    pub(crate) count: u8,
 }
 
 impl<I> Biterator<I> {
     pub fn new(input: I) -> Self {
-        Biterator {
-            input,
-            bits: 0,
-            count: 0,
-        }
+        Self::with_state(input, 0, 0)
+    }
+
+    pub fn with_state(input: I, bits: u64, count: u8) -> Self {
+        Biterator { input, bits, count }
     }
 
     pub fn as_inner(&self) -> &I {

@@ -880,15 +880,6 @@ impl Decoder {
         I::Position: Default + fmt::Display,
         's: 'a,
     {
-        dbg!(
-            &input.stream.as_inner().range(),
-            mcu_x,
-            mcu_y,
-            i,
-            j,
-            blocks_per_mcu,
-            produce_data,
-        );
         let frame = input.state.frame.as_ref().unwrap();
         let scan = input.state.scan.as_ref().unwrap();
 
@@ -990,11 +981,9 @@ impl Decoder {
                         ),
                     );
                 }
-                input.receive_extend(value).ok_or_else(|| {
-                    StreamErrorFor::<BiteratorStream<I>>::message_static_message(
-                        "Out of input in receive extend",
-                    )
-                })?
+                input
+                    .receive_extend(value)
+                    .ok_or_else(|| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?
             };
 
             // Malicious JPEG files can cause this add to overflow, therefore we use wrapping_add.
@@ -1061,9 +1050,7 @@ impl Decoder {
 
                         unzigzag.write(
                             input.receive_extend(s).ok_or_else(|| {
-                                StreamErrorFor::<BiteratorStream<I>>::message_static_message(
-                                    "Invalid receive_extend",
-                                )
+                                StreamErrorFor::<BiteratorStream<I>>::end_of_input()
                             })? << scan.low_approximation,
                         );
                         step!(1);
@@ -1110,6 +1097,7 @@ where [
                                 let checkpoint = input.checkpoint();
                                 let dc_predictor = input.state.scan_state.dc_predictors[i];
                                 let eob_run = input.state.scan_state.eob_run;
+
                                 let result = Decoder::decode_block_at(
                                     input,
                                     mcu_x,
@@ -1500,6 +1488,8 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>> {
 pub struct DecoderCodec {
     decoder: Decoder,
     state: AnySendPartialState,
+    bits: u64,
+    count: u8,
 }
 
 impl DecoderCodec {
@@ -1516,24 +1506,29 @@ impl tokio_codec::Decoder for DecoderCodec {
         if buf.is_empty() {
             return Ok(None);
         }
-        log::trace!("Decode: {:?}", buf);
 
-        let Self { decoder, state } = self;
+        let Self { decoder, state, .. } = self;
         let input = &buf[..];
-        let stream = DecoderStream(StateStream {
-            stream: biterator::Biterator::new(PartialStream(easy::Stream(input))),
+        let mut stream = DecoderStream(StateStream {
+            stream: biterator::Biterator::with_state(
+                PartialStream(easy::Stream(input)),
+                self.bits,
+                self.count,
+            ),
             state: decoder,
         });
-        let (item, consumed) =
-            combine::stream::decode(decode_parser(), stream, state).map_err(|err| {
-                err.map_position(|pos| pos.translate_position(input))
-                    .map_token(|token| format!("0x{:X}", token))
-                    .map_range(|range| format!("{:?}", range))
-            })?;
+        let result = combine::stream::decode(decode_parser(), &mut stream, state).map_err(|err| {
+            err.map_position(|pos| pos.translate_position(input))
+                .map_token(|token| format!("0x{:X}", token))
+                .map_range(|range| format!("{:?}", range))
+        });
+
+        self.bits = stream.stream.bits;
+        self.count = stream.stream.count;
+
+        let (item, consumed) = result?;
 
         buf.advance(consumed);
-
-        log::trace!("Consumed: {} {:?}", consumed, buf);
 
         match item {
             Some(result) => Ok(Some(result?)),
@@ -1546,6 +1541,8 @@ pub struct ReadDecoder<R> {
     reader: R,
     decoder: Decoder,
     state: AnySendPartialState,
+    bits: u64,
+    count: u8,
     remaining: Vec<u8>,
 }
 
@@ -1559,6 +1556,8 @@ where
             decoder: Decoder::default(),
             state: Default::default(),
             remaining: Default::default(),
+            bits: 0,
+            count: 0,
         }
     }
 
@@ -1577,11 +1576,19 @@ where
                 } else {
                     buffer
                 };
-                let stream = DecoderStream::new(
+                let mut stream = DecoderStream::with_state(
                     &mut self.decoder,
                     combine::easy::Stream(combine::stream::PartialStream(buffer)),
+                    self.bits,
+                    self.count,
                 );
-                match combine::stream::decode(decode_parser(), stream, &mut self.state) {
+
+                let result = combine::stream::decode(decode_parser(), &mut stream, &mut self.state);
+
+                self.bits = stream.stream.bits;
+                self.count = stream.stream.count;
+
+                match result {
                     Ok(x) => x,
                     Err(err) => {
                         return Err(err

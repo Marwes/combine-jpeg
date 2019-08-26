@@ -1,0 +1,10 @@
+language: rust
+cache: cargo
+rust:
+- nightly
+- beta
+- stable
+script:
+- cargo test --all-features
+- cargo test --benches --all-features
+- cargo check --no-default-features

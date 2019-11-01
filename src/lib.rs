@@ -9,13 +9,13 @@ use combine::{
     parser::{
         byte::num::be_u16,
         combinator::{any_send_partial_state, factory, AnySendPartialState},
-        item::{any, eof, satisfy, satisfy_map, value},
         range::{range, take},
         repeat::{count_min_max, iterate, repeat_skip_until},
+        token::{any, eof, satisfy, satisfy_map, value},
         ParseMode,
     },
     stream::{
-        user_state::StateStream, FullRangeStream, PartialStream, Positioned, ResetStream,
+        state::Stream as StateStream, PartialStream, Positioned, RangeStream, ResetStream,
         StreamErrorFor,
     },
     ParseResult, Parser, Stream, StreamOnce,
@@ -103,8 +103,8 @@ fn zero_data(data: &mut [i16]) {
 
 fn split_4_bit<'a, I>() -> impl Parser<I, Output = (u8, u8), PartialState = impl Static> + Send
 where
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 {
     any().map(|b| (b >> 4, b & 0x0F))
 }
@@ -114,9 +114,9 @@ type PartialState = AnySendPartialState;
 fn segment['a, 's, I, P, O](parser: P)(DecoderStream<'s, I>) -> O
 where [
     P: Parser<DecoderStream<'s, I>, Output = O> + 'a,
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
-    DecoderStream<'s, I>: Stream<Item = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
+    DecoderStream<'s, I>: Stream<Token = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     's: 'a,
 ]
 {
@@ -190,8 +190,8 @@ pub struct Component {
 parser! {
 fn sof['a, I](marker_index: u8)(I) -> Frame
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 ]
 {
     let marker_index = *marker_index;
@@ -283,8 +283,8 @@ struct DHT<'a> {
 parser! {
 fn huffman_table['a, I]()(I) -> DHT<'a>
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 ]
 {
     (
@@ -424,8 +424,8 @@ impl DQTPrecision {
 parser! {
 fn dqt['a, I]()(I) -> DQT
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 ]
 {
     split_4_bit()
@@ -461,8 +461,8 @@ where [
 
 fn dri<'a, I>() -> impl Parser<I, Output = u16, PartialState = impl Static> + Send
 where
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 {
     be_u16()
 }
@@ -486,12 +486,12 @@ struct ScanHeader {
 parser! {
 fn sos_segment['a, 's, I]()(DecoderStream<'s, I>) -> Scan
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-    DecoderStream<'s, I>: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     <DecoderStream<'s, I> as StreamOnce>::Error:
         ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Item,
+            <DecoderStream<'s, I> as StreamOnce>::Token,
             <DecoderStream<'s, I> as StreamOnce>::Range,
             <DecoderStream<'s, I> as StreamOnce>::Position
         >,
@@ -585,8 +585,8 @@ struct InputConverter<P> {
 }
 impl<'s, 'a, Input, P, O, S> Parser<DecoderStream<'s, Input>> for InputConverter<P>
 where
-    Input: Send + FullRangeStream<Item = u8, Range = &'a [u8]>,
-    Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
+    Input: Send + RangeStream<Token = u8, Range = &'a [u8]>,
+    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
     Input::Position: Default + fmt::Display,
     P: Parser<BiteratorStream<'s, Input>, Output = O, PartialState = S>,
     S: Default,
@@ -613,7 +613,7 @@ where
                     if err.is_unexpected_end_of_input() {
                         StreamErrorFor::<Input>::end_of_input()
                     } else {
-                        StreamErrorFor::<Input>::message_message(err) // FIXME
+                        StreamErrorFor::<Input>::message_format(err) // FIXME
                     },
                 )
             })
@@ -625,8 +625,8 @@ struct BiteratorConverter<P> {
 }
 impl<'s, 'a, Input, P, O, S> Parser<BiteratorStream<'s, Input>> for BiteratorConverter<P>
 where
-    Input: Send + FullRangeStream<Item = u8, Range = &'a [u8]>,
-    Input::Error: ParseError<Input::Item, Input::Range, Input::Position>,
+    Input: Send + RangeStream<Token = u8, Range = &'a [u8]>,
+    Input::Error: ParseError<Input::Token, Input::Range, Input::Position>,
     Input::Position: Default + fmt::Display,
     P: Parser<DecoderStream<'s, Input>, Output = O, PartialState = S>,
     S: Default,
@@ -654,7 +654,7 @@ where
                         StreamErrorFor::<BiteratorStream<'s, Input>>::end_of_input()
                     } else {
                         // FIXME
-                        StreamErrorFor::<BiteratorStream<'s, Input>>::message_message("FIXME")
+                        StreamErrorFor::<BiteratorStream<'s, Input>>::message_format("FIXME")
                     },
                 )
             })
@@ -665,12 +665,12 @@ parser! {
 type PartialState = AnySendPartialState;
 fn sos['a, 's, I]()(DecoderStream<'s, I>) -> ()
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-    DecoderStream<'s, I>: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     <DecoderStream<'s, I> as StreamOnce>::Error:
         ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Item,
+            <DecoderStream<'s, I> as StreamOnce>::Token,
             <DecoderStream<'s, I> as StreamOnce>::Range,
             <DecoderStream<'s, I> as StreamOnce>::Position
         >,
@@ -731,8 +731,8 @@ enum AdobeColorTransform {
 parser! {
 fn app_adobe['a, I]()(I) -> AdobeColorTransform
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 ]
 {
     range(&b"Adobe\0"[..]).skip(take(5)).with(
@@ -875,8 +875,8 @@ impl Decoder {
         produce_data: bool,
     ) -> StdParseResult<(), BiteratorStream<'s, I>>
     where
-        I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+        I::Error: ParseError<I::Token, I::Range, I::Position>,
         I::Position: Default + fmt::Display,
         's: 'a,
     {
@@ -963,8 +963,8 @@ impl Decoder {
         dc_predictor: &mut i16,
     ) -> Result<(), StreamErrorFor<BiteratorStream<'s, I>>>
     where
-        I: Send + FullRangeStream<Item = u8, Range = &'a [u8]>,
-        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I: Send + RangeStream<Token = u8, Range = &'a [u8]>,
+        I::Error: ParseError<I::Token, I::Range, I::Position>,
         I::Position: Default,
     {
         if scan.start_of_selection == 0 {
@@ -1071,8 +1071,8 @@ fn iteration_decode_scanner['a, 's, I](
     components_len: usize
 )(BiteratorStream<'s, I>) -> ()
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default + fmt::Display,
     's: 'a,
 ]
@@ -1142,8 +1142,8 @@ fn decode_scan['s, 'a, I](
     produce_data: bool
 )(BiteratorStream<'s, I>) -> ComponentVec<Vec<u8>>
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default + fmt::Display,
     's: 'a,
 ]
@@ -1273,8 +1273,8 @@ fn restart_parser['s, 'a, I](
     mcu_y: u16
 )(BiteratorStream<'s, I>) -> ()
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default + fmt::Display,
     's: 'a,
 ]
@@ -1288,7 +1288,7 @@ where [
                         return Err(Consumed::Consumed(
                             <DecoderStream<I> as StreamOnce>::Error::from_error(
                                 input.position(),
-                                StreamErrorFor::<DecoderStream<I>>::message_message(format_args!(
+                                StreamErrorFor::<DecoderStream<I>>::message_format(format_args!(
                                     "found RST{} where RST{} was expected",
                                     n, input.state.scan_state.expected_rst_num
                                 )),
@@ -1312,7 +1312,7 @@ where [
                 marker => Err(Consumed::Consumed(
                     <DecoderStream<I> as StreamOnce>::Error::from_error(
                         input.position(),
-                        StreamErrorFor::<DecoderStream<I>>::message_message(format_args!(
+                        StreamErrorFor::<DecoderStream<I>>::message_format(format_args!(
                             "found marker {:?} inside scan where RST({}) was expected",
                             marker, input.state.scan_state.expected_rst_num
                         )),
@@ -1347,12 +1347,12 @@ parser! {
 type PartialState = AnySendPartialState;
 pub fn decode_parser['a, 's, I]()(DecoderStream<'s, I>) -> Result<Vec<u8>>
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-    DecoderStream<'s, I>: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     <DecoderStream<'s, I> as StreamOnce>::Error:
         ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Item,
+            <DecoderStream<'s, I> as StreamOnce>::Token,
             <DecoderStream<'s, I> as StreamOnce>::Range,
             <DecoderStream<'s, I> as StreamOnce>::Position
         >,
@@ -1430,12 +1430,12 @@ parser! {
 type PartialState = AnySendPartialState;
 fn do_segment['a, 's, I](marker: Marker)(DecoderStream<'s, I>) -> ()
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
-    DecoderStream<'s, I>: FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     <DecoderStream<'s, I> as StreamOnce>::Error:
         ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Item,
+            <DecoderStream<'s, I> as StreamOnce>::Token,
             <DecoderStream<'s, I> as StreamOnce>::Range,
             <DecoderStream<'s, I> as StreamOnce>::Position
         >,

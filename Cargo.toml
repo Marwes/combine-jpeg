@@ -9,7 +9,7 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "0.4"
-combine = { version = "4.0.0-alpha.1", path = "../combine" }
+combine = { version = "4.0.0-beta.1", path = "../combine" }
 derive_more = "0.15"
 itertools = "0.8"
 log = "0.4"
@@ -30,7 +30,7 @@ futures = "0.1"
 tokio = "0.1"
 
 mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
-jpeg-decoder = { version = "0.1", default-features = false } # Disable multithreaded decoding since no other decoder uses it 
+jpeg-decoder = { version = "0.1", default-features = false } # Disable multithreaded decoding since no other decoder uses it
 
 [[bench]]
 name = "basic"

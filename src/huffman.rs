@@ -118,8 +118,8 @@ impl BaseTable {
 
     pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Option<u8>
     where
-        I: Stream<Item = u8>,
-        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I: Stream<Token = u8>,
+        I::Error: ParseError<I::Token, I::Range, I::Position>,
         I::Position: Default,
     {
         if input.count() < 16 {
@@ -176,8 +176,8 @@ impl AcTable {
 
     pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Option<u8>
     where
-        I: Stream<Item = u8>,
-        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I: Stream<Token = u8>,
+        I::Error: ParseError<I::Token, I::Range, I::Position>,
         I::Position: Default,
     {
         self.table.decode(input)
@@ -188,8 +188,8 @@ impl AcTable {
         input: &mut Biterator<I>,
     ) -> Result<Option<(i16, u8)>, ()>
     where
-        I: Stream<Item = u8>,
-        I::Error: ParseError<I::Item, I::Range, I::Position>,
+        I: Stream<Token = u8>,
+        I::Error: ParseError<I::Token, I::Range, I::Position>,
         I::Position: Default,
     {
         if input.count() < LUT_BITS {

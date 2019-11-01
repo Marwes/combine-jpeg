@@ -3,8 +3,8 @@ use std::mem;
 use combine::{
     error::ParseResult,
     stream::{
-        user_state::StateStream, FullRangeStream, Positioned, RangeStreamOnce, ResetStream,
-        StreamErrorFor, StreamOnce,
+        state::Stream as StateStream, Positioned, RangeStreamOnce, ResetStream, StreamErrorFor,
+        StreamOnce,
     },
 };
 
@@ -37,13 +37,13 @@ impl<'s, I> StreamOnce for DecoderStream<'s, I>
 where
     I: Send + StreamOnce,
 {
-    type Item = I::Item;
+    type Token = I::Token;
     type Range = I::Range;
     type Position = I::Position;
     type Error = I::Error;
 
     #[inline]
-    fn uncons(&mut self) -> Result<I::Item, StreamErrorFor<Self>> {
+    fn uncons(&mut self) -> Result<I::Token, StreamErrorFor<Self>> {
         self.0.stream.as_inner_mut().uncons()
     }
 
@@ -77,14 +77,14 @@ where
 
     fn uncons_while<F>(&mut self, f: F) -> Result<Self::Range, StreamErrorFor<Self>>
     where
-        F: FnMut(Self::Item) -> bool,
+        F: FnMut(Self::Token) -> bool,
     {
         self.stream.as_inner_mut().uncons_while(f)
     }
 
     fn uncons_while1<F>(&mut self, f: F) -> ParseResult<Self::Range, StreamErrorFor<Self>>
     where
-        F: FnMut(Self::Item) -> bool,
+        F: FnMut(Self::Token) -> bool,
     {
         self.stream.as_inner_mut().uncons_while1(f)
     }
@@ -92,12 +92,7 @@ where
     fn distance(&self, end: &Self::Checkpoint) -> usize {
         self.stream.as_inner().distance(end)
     }
-}
 
-impl<'s, I> FullRangeStream for DecoderStream<'s, I>
-where
-    I: Send + FullRangeStream,
-{
     fn range(&self) -> Self::Range {
         self.stream.as_inner().range()
     }

@@ -4,11 +4,11 @@ use combine::{
     parser::{
         byte::{byte, take_until_byte},
         combinator::{any_send_partial_state, AnySendPartialState},
-        item::satisfy_map,
         range::take_while1,
         repeat::sep_by1,
+        token::satisfy_map,
     },
-    stream::FullRangeStream,
+    stream::RangeStream,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,8 +59,8 @@ pub struct MarkerParser;
 type PartialState = AnySendPartialState;
 pub fn marker['a, I]()(I) -> Marker
 where [
-    I: Send + FullRangeStream<Item = u8, Range = &'a [u8]> + 'a,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 ]
 {
     any_send_partial_state(sep_by1::<Sink, _, _, _>(

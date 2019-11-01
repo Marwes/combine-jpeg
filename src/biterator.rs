@@ -33,8 +33,8 @@ impl<I> Biterator<I> {
 
 impl<I> Biterator<I>
 where
-    I: Stream<Item = u8>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Stream<Token = u8>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default,
 {
     pub fn count(&self) -> u8 {
@@ -117,11 +117,11 @@ pub fn extend(v: u16, t: u8) -> i16 {
 
 impl<I> StreamOnce for Biterator<I>
 where
-    I: Stream<Item = u8>,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Stream<Token = u8>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default,
 {
-    type Item = bool;
+    type Token = bool;
     type Range = u16;
     type Position = I::Position;
     type Error = easy::Errors<bool, u16, I::Position>;
@@ -140,8 +140,8 @@ where
 
 impl<I> ResetStream for Biterator<I>
 where
-    I: Stream<Item = u8> + ResetStream,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Stream<Token = u8> + ResetStream,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default,
 {
     type Checkpoint = (I::Checkpoint, u64, u8);
@@ -164,8 +164,8 @@ where
 
 impl<I> Positioned for Biterator<I>
 where
-    I: Stream<Item = u8> + Positioned,
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I: Stream<Token = u8> + Positioned,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default,
 {
     fn position(&self) -> Self::Position {

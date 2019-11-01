@@ -20,7 +20,7 @@ tokio-io = "0.1"
 tokio-codec = "0.1"
 
 [dev-dependencies]
-criterion = { version = "0.2", default-features = false }
+criterion = { version = "0.3", default-features = false }
 env_logger = "0.6"
 image = { version = "0.21", default-features = false, features = ["png_codec"] }
 partial-io = { version = "0.3", features = ["quickcheck", "tokio"] }

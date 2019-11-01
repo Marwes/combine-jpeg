@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use criterion::{black_box, criterion_group, criterion_main, Bencher, Benchmark, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Bencher, Criterion};
 
 use combine_jpeg::Decoder;
 
@@ -59,13 +59,16 @@ fn it_works_jpeg_decoder(b: &mut Bencher) {
 }
 
 fn decode_group(c: &mut Criterion) {
-    c.bench(
-        "it_works",
-        Benchmark::new("combine", it_works)
-            .with_function("mozjpeg", it_works_mozjpeg)
-            .with_function("jpeg-decoder", it_works_jpeg_decoder)
-            .sample_size(20),
-    );
+    {
+        let mut group = c.benchmark_group("it_works");
+        group.sample_size(10);
+
+        group.warm_up_time(std::time::Duration::from_millis(1)); // FIXME Remove
+
+        group.bench_function("combine", it_works);
+        group.bench_function("mozjpeg", it_works_mozjpeg);
+        group.bench_function("jpeg-decoder", it_works_jpeg_decoder);
+    }
     c.bench_function("green", green);
     c.bench_function("simple", simple);
 }

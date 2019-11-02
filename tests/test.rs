@@ -64,9 +64,8 @@ fn green() {
 }
 
 #[test]
-fn simple() {
+fn simple_basic() {
     let out = test_decode("simple");
-
     assert_eq!(out, &EXPECTED_SIMPLE[..]);
 }
 

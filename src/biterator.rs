@@ -204,4 +204,17 @@ mod tests {
             [0b110, 0b101, 0b110, 0b011, 0b001]
         );
     }
+
+    #[test]
+    #[ignore]
+    fn multibyte() {
+        let mut biterator = Biterator::new(&[0b11010111, 0b00110010, 0b11010111, 0b00110010][..]);
+
+        assert_eq!(
+            (0..)
+                .scan((), |_, _| biterator.next_bits(9))
+                .collect::<Vec<_>>(),
+            [0b110101110, 0b011001011, 0b0101110010,]
+        );
+    }
 }

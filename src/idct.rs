@@ -12,15 +12,25 @@ use std::{
 use crate::clamp::stbi_clamp;
 
 // This is based on stb_image's 'stbi__idct_block'.
-pub fn dequantize_and_idct_block<'a>(
+pub fn dequantize_and_idct_block<'a, I>(
     coefficients: &[i16; 64],
     quantization_table: &[u16; 64],
-    output: impl IntoIterator<Item = &'a mut [u8; 8]>,
-) {
+    output: I,
+) where
+    I: IntoIterator<Item = &'a mut [u8; 8]>,
+    I::IntoIter: ExactSizeIterator<Item = &'a mut [u8; 8]>,
+{
     #[inline(always)]
     fn dequantize(c: i16, q: u16) -> Wrapping<i32> {
         Wrapping(i32::from(c) * i32::from(q))
     }
+
+    let output = output.into_iter();
+    debug_assert!(
+        output.len() >= 8,
+        "Output iterator has the wrong length: {}",
+        output.len()
+    );
 
     // SAFETY This gets fully initialized in the columns loop but since it iterates over columns
     // LLVM does not realize this and elide the initialization

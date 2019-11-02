@@ -85,8 +85,8 @@ where
     pub fn fill_bits(&mut self) -> Option<()> {
         while self.count <= 56 {
             let checkpoint = self.checkpoint();
-            let b = match self.input.uncons().ok()? {
-                0xFF => {
+            let b = match self.input.uncons().ok() {
+                Some(0xFF) => {
                     if self.input.uncons().ok()? == 0x00 {
                         0xFF
                     } else {
@@ -97,7 +97,8 @@ where
                         return Some(()); // Not a stuffed 0xFF so we found a marker.
                     }
                 }
-                b => b,
+                Some(b) => b,
+                None => break,
             };
             self.bits |= u64::from(b) << 56 - self.count;
             self.count += 8;
@@ -170,5 +171,37 @@ where
 {
     fn position(&self) -> Self::Position {
         self.input.position()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic() {
+        let mut biterator = Biterator::new(&[0b11010111, 0b00110010][..]);
+
+        assert_eq!(
+            (0..)
+                .scan((), |_, _| biterator.uncons().ok())
+                .collect::<Vec<_>>(),
+            [
+                true, true, false, true, false, true, true, true, false, false, true, true, false,
+                false, true, false
+            ]
+        );
+    }
+
+    #[test]
+    fn multibit() {
+        let mut biterator = Biterator::new(&[0b11010111, 0b00110010][..]);
+
+        assert_eq!(
+            (0..)
+                .scan((), |_, _| biterator.next_bits(3))
+                .collect::<Vec<_>>(),
+            [0b110, 0b101, 0b110, 0b011, 0b001]
+        );
     }
 }

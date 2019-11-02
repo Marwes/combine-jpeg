@@ -134,6 +134,9 @@ impl BaseTable {
             input.consume_bits(size);
             Some(value)
         } else {
+            if input.count() < 16 {
+                return None;
+            }
             let bits = input.peek_bits(16);
 
             for i in LUT_BITS..16 {

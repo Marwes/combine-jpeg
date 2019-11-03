@@ -116,7 +116,8 @@ impl BaseTable {
         Ok(table)
     }
 
-    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Option<u8>
+    #[inline]
+    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Result<u8, ()>
     where
         I: Stream<Token = u8>,
         I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -124,19 +125,13 @@ impl BaseTable {
     {
         if input.count() < 16 {
             input.fill_bits()?;
-            if input.count() < LUT_BITS {
-                return None;
-            }
         }
         let (value, size) = self.lut[usize::from(input.peek_bits(LUT_BITS))];
 
         if size > 0 {
             input.consume_bits(size);
-            Some(value)
+            Ok(value)
         } else {
-            if input.count() < 16 {
-                return None;
-            }
             let bits = input.peek_bits(16);
 
             for i in LUT_BITS..16 {
@@ -146,10 +141,10 @@ impl BaseTable {
                     input.consume_bits(i + 1);
 
                     let index = (code + self.val_offset[usize::from(i)]) as usize;
-                    return Some(self.values[index]);
+                    return Ok(self.values[index]);
                 }
             }
-            None
+            Err(())
         }
     }
 }
@@ -177,7 +172,8 @@ impl AcTable {
         Ok(AcTable { table, ac_lut })
     }
 
-    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Option<u8>
+    #[inline]
+    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Result<u8, ()>
     where
         I: Stream<Token = u8>,
         I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -186,6 +182,7 @@ impl AcTable {
         self.table.decode(input)
     }
 
+    #[inline]
     pub(crate) fn decode_fast_ac<I>(
         &self,
         input: &mut Biterator<I>,
@@ -196,10 +193,7 @@ impl AcTable {
         I::Position: Default,
     {
         if input.count() < LUT_BITS {
-            input.fill_bits().ok_or_else(|| ())?;
-            if input.count() < LUT_BITS {
-                return Ok(None);
-            }
+            input.fill_bits()?;
         }
 
         let (value, run_size) = self.ac_lut[usize::from(input.peek_bits_u8(LUT_BITS))];

@@ -1003,7 +1003,7 @@ impl Decoder {
         if scan.start_of_selection == 0 {
             let value = dc_table
                 .decode(input)
-                .ok_or_else(|| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?;
+                .map_err(|()| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?;
             let diff = if value == 0 {
                 0
             } else {
@@ -1016,7 +1016,7 @@ impl Decoder {
                 }
                 input
                     .receive_extend(value)
-                    .ok_or_else(|| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?
+                    .map_err(|()| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?
             };
 
             // Malicious JPEG files can cause this add to overflow, therefore we use wrapping_add.
@@ -1051,8 +1051,7 @@ impl Decoder {
             loop {
                 if let Some((value, run)) = ac_table
                     .decode_fast_ac(input)
-                    .ok()
-                    .ok_or_else(|| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?
+                    .map_err(|()| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?
                 {
                     step!(run);
 
@@ -1061,7 +1060,7 @@ impl Decoder {
                 } else {
                     let byte = ac_table
                         .decode(input)
-                        .ok_or_else(|| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?;
+                        .map_err(|()| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?;
                     let r = byte >> 4;
                     let s = byte & 0x0f;
 
@@ -1072,7 +1071,7 @@ impl Decoder {
                                 *eob_run = (1 << r) - 1;
 
                                 if r > 0 {
-                                    *eob_run += input.next_bits(r).ok_or_else(|| StreamErrorFor::<BiteratorStream<I>>::message_static_message("out of bits"))?;
+                                    *eob_run += input.next_bits(r).map_err(|()| StreamErrorFor::<BiteratorStream<I>>::message_static_message("out of bits"))?;
                                 }
 
                                 break;
@@ -1082,7 +1081,7 @@ impl Decoder {
                         step!(r);
 
                         unzigzag.write(
-                            input.receive_extend(s).ok_or_else(|| {
+                            input.receive_extend(s).map_err(|()| {
                                 StreamErrorFor::<BiteratorStream<I>>::end_of_input()
                             })? << scan.low_approximation,
                         );

@@ -192,6 +192,12 @@ pub struct Component {
     pub vertical_sampling_factor: u8,
     pub quantization_table_destination_selector: u8,
 
+    // Computed properties
+    pub blocks_per_mcu: u16,
+    pub line_stride: usize,
+    pub mcu_sample_size: Dimensions,
+    pub bytes_per_mcu_line: usize,
+
     /// The number of blocks for this component
     ///
     /// (mcus * sampling factor)
@@ -220,7 +226,15 @@ where [
                     vertical_sampling_factor,
                     quantization_table_destination_selector,
 
+                    blocks_per_mcu: u16::from(horizontal_sampling_factor) * u16::from(vertical_sampling_factor),
+                    mcu_sample_size: Dimensions {
+                        width: u16::from(horizontal_sampling_factor) * DCT_SIZE_U16,
+                        height: u16::from(vertical_sampling_factor) * DCT_SIZE_U16,
+                    },
+
                     // Filled in later
+                    bytes_per_mcu_line: Default::default(),
+                    line_stride: Default::default(),
                     block_size: Default::default(),
                     size: Default::default(),
                 },
@@ -268,6 +282,10 @@ where [
                             mcu_size.width * u16::from(component.horizontal_sampling_factor);
                         component.block_size.height =
                             mcu_size.height * u16::from(component.vertical_sampling_factor);
+
+                        let bytes_per_mcu = usize::from(component.blocks_per_mcu) * BLOCK_SIZE;
+                        component.bytes_per_mcu_line = bytes_per_mcu * usize::from(component.block_size.width);
+                        component.line_stride = usize::from(component.block_size.width) * DCT_SIZE;
                     }
                 }
 
@@ -764,7 +782,8 @@ where [
 const MAX_HUFFMAN_TABLES: usize = 4;
 const MAX_QUANTIZATION_TABLES: usize = 4;
 
-const DCT_SIZE: usize = 8;
+const DCT_SIZE_U16: u16 = 8;
+const DCT_SIZE: usize = DCT_SIZE_U16 as usize;
 const BLOCK_SIZE: usize = DCT_SIZE * DCT_SIZE;
 
 #[derive(Default)]
@@ -789,7 +808,6 @@ struct ScanState {
     expected_rst_num: u8,
     mcus_left_until_restart: u16,
     results: ComponentVec<Vec<u8>>,
-    offsets: [usize; MAX_COMPONENTS],
 }
 
 impl Default for ScanState {
@@ -801,7 +819,6 @@ impl Default for ScanState {
             expected_rst_num: 0,
             mcus_left_until_restart: 0,
             results: Default::default(),
-            offsets: [0; MAX_COMPONENTS],
         }
     }
 }
@@ -838,11 +855,7 @@ impl Decoder {
             &mcu_row_coefficients[..]
         };
         let mut coefficients_chunks = row_coefficients.chunks_exact(BLOCK_SIZE);
-        for (component, offset, result) in izip!(
-            &frame.components,
-            &mut self.scan_state.offsets,
-            &mut self.scan_state.results
-        ) {
+        for (component, result) in izip!(&frame.components, &mut self.scan_state.results) {
             // Convert coefficients from a MCU row to samples.
 
             let quantization_table = quantization_tables
@@ -854,11 +867,6 @@ impl Decoder {
                     component.quantization_table_destination_selector
                 )
             });
-
-            let mcu_width = usize::from(component.horizontal_sampling_factor);
-            let mcu_height = usize::from(component.vertical_sampling_factor);
-
-            let line_stride = usize::from(component.block_size.width) * DCT_SIZE;
 
             // MCUs are 8x8 (normally)
             //
@@ -882,22 +890,21 @@ impl Decoder {
             // | ---> | ---> |
             // +------+------+
 
-            let data_units_per_mcu = mcu_width * mcu_height;
-            let bytes_per_mcu = data_units_per_mcu * BLOCK_SIZE;
-            let bytes_per_mcu_line = bytes_per_mcu * usize::from(component.block_size.width);
-            let mcu_offset =
-                usize::from(mcu_y) * bytes_per_mcu_line + usize::from(mcu_x) * mcu_width * DCT_SIZE;
+            let mcu_offset = usize::from(mcu_y) * component.bytes_per_mcu_line
+                + usize::from(mcu_x) * usize::from(component.mcu_sample_size.width);
             let component_result = &mut result[mcu_offset..];
 
-            for y_offset in (0..mcu_height * line_stride * DCT_SIZE).step_by(line_stride * DCT_SIZE)
+            for y_offset in (0..usize::from(component.mcu_sample_size.height)
+                * component.line_stride)
+                .step_by(component.line_stride * DCT_SIZE)
             {
                 let component_result_start = &mut component_result[y_offset..];
 
-                for x in (0..mcu_width * DCT_SIZE).step_by(DCT_SIZE) {
+                for x in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE) {
                     let coefficients_chunk =
                         coefficients_chunks.next().expect("Missing coefficients");
                     let output = component_result_start[x..]
-                        .chunks_mut(line_stride)
+                        .chunks_mut(component.line_stride)
                         .map(|chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE));
                     idct::dequantize_and_idct_block(
                         fixed_slice!(coefficients_chunk; BLOCK_SIZE),
@@ -906,10 +913,11 @@ impl Decoder {
                     );
                 }
             }
-
-            *offset += mcu_width * mcu_height * BLOCK_SIZE;
         }
-        debug_assert!(coefficients_chunks.next().is_none());
+        debug_assert!(
+            coefficients_chunks.next().is_none(),
+            "All coefficients were not processed"
+        );
     }
 
     #[inline(never)]
@@ -950,9 +958,8 @@ impl Decoder {
             .as_ref()
             .unwrap_or_else(|| panic!("Missing AC table")); // TODO un-unwrap
 
-            let blocks_per_mcu = u16::from(component.horizontal_sampling_factor)
-                * u16::from(component.vertical_sampling_factor);
-            for coefficients in (&mut row_coefficients).take(usize::from(blocks_per_mcu)) {
+            for coefficients in (&mut row_coefficients).take(usize::from(component.blocks_per_mcu))
+            {
                 let coefficients = fixed_slice_mut!(coefficients; BLOCK_SIZE);
 
                 let result = Decoder::decode_block(
@@ -980,6 +987,7 @@ impl Decoder {
         Ok(())
     }
 
+    #[inline(never)]
     fn decode_block<'s, 'a, I>(
         coefficients: &mut [i16; BLOCK_SIZE],
         scan: &Scan,
@@ -1103,7 +1111,6 @@ where [
     's: 'a,
 ]
 {
-
     let produce_data = *produce_data;
     any_send_partial_state(iterate::<(), _, _, _, _>(iproduct!(0..mcu_size.height, 0..mcu_size.width), move |&(mcu_y, mcu_x), _| {
         (
@@ -1184,8 +1191,7 @@ where [
                         .components
                         .iter()
                         .map(|component| {
-                            usize::from(component.horizontal_sampling_factor) *
-                                usize::from(component.vertical_sampling_factor) * BLOCK_SIZE
+                            usize::from(component.blocks_per_mcu) * BLOCK_SIZE
                         })
                         .sum()
                 ]
@@ -1200,7 +1206,6 @@ where [
             mcus_left_until_restart: input.state.restart_interval,
             mcu_row_coefficients,
             results: Default::default(),
-            offsets: [0; MAX_COMPONENTS],
         };
 
         if produce_data {
@@ -1226,11 +1231,10 @@ where [
 
         Ok(((), Consumed::Empty(())))
     })
-    .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
+    .then_partial(move |_| factory(move |input: &mut BiteratorStream<'s, I>| {
         let frame = input.state.frame.as_ref().unwrap();
-        (produce_data, frame.mcu_size)
-    })
-    .then_partial(|&mut (a, b)| iteration_decode_scanner(a, b))
+        iteration_decode_scanner(produce_data, frame.mcu_size)
+    }))
     .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
         let results = &mut input.state.scan_state.results;
         input

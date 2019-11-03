@@ -24,7 +24,7 @@ impl TableClass {
 const LUT_BITS: u8 = 8;
 
 pub(crate) struct BaseTable {
-    values: Vec<u8>,
+    values: [u8; 256],
     max_code: [i32; 16],
     val_offset: [i32; 16],
     lut: [(u8, u8); 1 << LUT_BITS],
@@ -33,7 +33,7 @@ pub(crate) struct BaseTable {
 impl Default for BaseTable {
     fn default() -> Self {
         BaseTable {
-            values: Default::default(),
+            values: [0; 256],
             max_code: Default::default(),
             val_offset: Default::default(),
             lut: [(0, 0); 1 << LUT_BITS],
@@ -85,7 +85,7 @@ impl BaseTable {
         }
 
         let mut table = BaseTable::default();
-        table.values = values.to_owned();
+        table.values[..values.len()].copy_from_slice(values);
 
         let mut p = 0i32;
         for l in 0..16 {

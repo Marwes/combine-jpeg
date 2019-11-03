@@ -764,7 +764,8 @@ where [
 const MAX_HUFFMAN_TABLES: usize = 4;
 const MAX_QUANTIZATION_TABLES: usize = 4;
 
-const BLOCK_SIZE: usize = 64;
+const DCT_SIZE: usize = 8;
+const BLOCK_SIZE: usize = DCT_SIZE * DCT_SIZE;
 
 #[derive(Default)]
 pub struct Decoder {
@@ -837,12 +838,11 @@ impl Decoder {
             &mcu_row_coefficients[..]
         };
         let mut coefficients_chunks = row_coefficients.chunks_exact(BLOCK_SIZE);
-        izip!(
+        for (component, offset, result) in izip!(
             &frame.components,
             &mut self.scan_state.offsets,
             &mut self.scan_state.results
-        )
-        .for_each(|(component, offset, result)| {
+        ) {
             // Convert coefficients from a MCU row to samples.
 
             let quantization_table = quantization_tables
@@ -857,8 +857,6 @@ impl Decoder {
 
             let mcu_width = usize::from(component.horizontal_sampling_factor);
             let mcu_height = usize::from(component.vertical_sampling_factor);
-
-            const DCT_SIZE: usize = 8;
 
             let line_stride = usize::from(component.block_size.width) * DCT_SIZE;
 
@@ -891,7 +889,8 @@ impl Decoder {
                 usize::from(mcu_y) * bytes_per_mcu_line + usize::from(mcu_x) * mcu_width * DCT_SIZE;
             let component_result = &mut result[mcu_offset..];
 
-            for y_offset in (0..mcu_height * line_stride * 8).step_by(line_stride * 8) {
+            for y_offset in (0..mcu_height * line_stride * DCT_SIZE).step_by(line_stride * DCT_SIZE)
+            {
                 let component_result_start = &mut component_result[y_offset..];
 
                 for x in (0..mcu_width * DCT_SIZE).step_by(DCT_SIZE) {
@@ -909,14 +908,13 @@ impl Decoder {
             }
 
             *offset += mcu_width * mcu_height * BLOCK_SIZE;
-        });
+        }
         debug_assert!(coefficients_chunks.next().is_none());
     }
 
     #[inline(never)]
     fn decode_row<'s, 'a, I>(
         input: &mut BiteratorStream<'s, I>,
-        components_len: usize,
     ) -> Result<(), StreamErrorFor<BiteratorStream<'s, I>>>
     where
         I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
@@ -938,11 +936,11 @@ impl Decoder {
             .mcu_row_coefficients
             .chunks_exact_mut(BLOCK_SIZE);
 
-        for i in 0..components_len {
-            let component = &frame.components[i];
-
-            let scan_header = &scan.headers[i];
-
+        for (component, scan_header, dc_predictor) in izip!(
+            &frame.components,
+            &scan.headers,
+            &mut input.state.scan_state.dc_predictors
+        ) {
             let dc_table = input.state.dc_huffman_tables
                 [usize::from(scan_header.dc_table_selector)]
             .as_ref()
@@ -964,7 +962,7 @@ impl Decoder {
                     &ac_table,
                     &mut input.stream,
                     &mut input.state.scan_state.eob_run,
-                    &mut input.state.scan_state.dc_predictors[i],
+                    dc_predictor,
                 );
 
                 if let Err(err) = result {
@@ -1096,8 +1094,7 @@ parser! {
 type PartialState = AnySendPartialState;
 fn iteration_decode_scanner['a, 's, I](
     produce_data: bool,
-    mcu_size: Dimensions,
-    components_len: usize
+    mcu_size: Dimensions
 )(BiteratorStream<'s, I>) -> ()
 where [
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
@@ -1108,11 +1105,10 @@ where [
 {
 
     let produce_data = *produce_data;
-    let components_len = *components_len;
     any_send_partial_state(iterate::<(), _, _, _, _>(iproduct!(0..mcu_size.height, 0..mcu_size.width), move |&(mcu_y, mcu_x), _| {
         (
             parser(move |input: &mut BiteratorStream<'s, I>| {
-                Decoder::decode_row(input, components_len)
+                Decoder::decode_row(input)
                     .map(|()| ((), Consumed::Consumed(())))
                     .map_err(|err| {
                         Consumed::Consumed(
@@ -1221,7 +1217,10 @@ where [
                 let size = component.block_size.area() * BLOCK_SIZE;
 
                 // TODO perf: memset costs a few percent performance for no win
-                result.resize(size, 0);
+                result.reserve(size);
+                unsafe {
+                    result.set_len(size);
+                }
             }
         }
 
@@ -1229,9 +1228,9 @@ where [
     })
     .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
         let frame = input.state.frame.as_ref().unwrap();
-        (produce_data, frame.mcu_size, frame.components.len())
+        (produce_data, frame.mcu_size)
     })
-    .then_partial(|&mut (a, b, c)| iteration_decode_scanner(a, b, c))
+    .then_partial(|&mut (a, b)| iteration_decode_scanner(a, b))
     .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
         let results = &mut input.state.scan_state.results;
         input

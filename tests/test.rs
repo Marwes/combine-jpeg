@@ -50,7 +50,7 @@ fn it_works() {
 }
 
 #[test]
-fn green() {
+fn green_basic() {
     let out = test_decode("green");
 
     assert_eq!(

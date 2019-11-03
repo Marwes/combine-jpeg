@@ -205,6 +205,8 @@ pub struct Component {
     pub size: Dimensions,
 }
 
+const MAX_BLOCKS_IN_MCU: u8 = 10; // From mozjpeg
+
 parser! {
 fn sof['a, I](marker_index: u8)(I) -> Frame
 where [
@@ -802,7 +804,7 @@ pub struct Decoder {
 }
 
 struct ScanState {
-    mcu_row_coefficients: Vec<i16>,
+    mcu_row_coefficients: [i16; MAX_BLOCKS_IN_MCU as usize * BLOCK_SIZE],
     dc_predictors: [i16; MAX_COMPONENTS],
     eob_run: u16,
     expected_rst_num: u8,
@@ -813,7 +815,7 @@ struct ScanState {
 impl Default for ScanState {
     fn default() -> Self {
         ScanState {
-            mcu_row_coefficients: Default::default(),
+            mcu_row_coefficients: [0; MAX_BLOCKS_IN_MCU as usize * BLOCK_SIZE],
             dc_predictors: [0; MAX_COMPONENTS],
             eob_run: 0,
             expected_rst_num: 0,
@@ -914,10 +916,6 @@ impl Decoder {
                 }
             }
         }
-        debug_assert!(
-            coefficients_chunks.next().is_none(),
-            "All coefficients were not processed"
-        );
     }
 
     #[inline(never)]
@@ -1184,27 +1182,12 @@ where [
             ));
         }
 
-        let mcu_row_coefficients: Vec<_> =
-            if produce_data && frame.coding_process() != CodingProcess::Progressive {
-                vec![0;
-                    frame
-                        .components
-                        .iter()
-                        .map(|component| {
-                            usize::from(component.blocks_per_mcu) * BLOCK_SIZE
-                        })
-                        .sum()
-                ]
-            } else {
-                Vec::new()
-            };
-
         input.state.scan_state = ScanState {
             dc_predictors: [0i16; MAX_COMPONENTS],
             eob_run: 0,
             expected_rst_num: 0,
             mcus_left_until_restart: input.state.restart_interval,
-            mcu_row_coefficients,
+            mcu_row_coefficients: [0; MAX_BLOCKS_IN_MCU as usize * BLOCK_SIZE],
             results: Default::default(),
         };
 

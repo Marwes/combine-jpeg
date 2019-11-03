@@ -126,7 +126,19 @@ impl BaseTable {
         if input.count() < 16 {
             input.fill_bits()?;
         }
-        let (value, size) = self.lut[usize::from(input.peek_bits(LUT_BITS))];
+
+        let lut_peek = input.peek_bits_u8(LUT_BITS);
+        self.decode_inner(input, lut_peek)
+    }
+
+    #[inline]
+    pub(crate) fn decode_inner<I>(&self, input: &mut Biterator<I>, lut_peek: u8) -> Result<u8, ()>
+    where
+        I: Stream<Token = u8>,
+        I::Error: ParseError<I::Token, I::Range, I::Position>,
+        I::Position: Default,
+    {
+        let (value, size) = self.lut[usize::from(lut_peek)];
 
         if size > 0 {
             input.consume_bits(size);
@@ -147,6 +159,12 @@ impl BaseTable {
             Err(())
         }
     }
+}
+
+pub enum AcResult {
+    Fast(i16, u8),
+    Normal(u8),
+    Err,
 }
 
 impl AcTable {
@@ -173,40 +191,33 @@ impl AcTable {
     }
 
     #[inline]
-    pub(crate) fn decode<I>(&self, input: &mut Biterator<I>) -> Result<u8, ()>
+    pub(crate) fn decode_fast_ac<I>(&self, input: &mut Biterator<I>) -> AcResult
     where
         I: Stream<Token = u8>,
         I::Error: ParseError<I::Token, I::Range, I::Position>,
         I::Position: Default,
     {
-        self.table.decode(input)
-    }
-
-    #[inline]
-    pub(crate) fn decode_fast_ac<I>(
-        &self,
-        input: &mut Biterator<I>,
-    ) -> Result<Option<(i16, u8)>, ()>
-    where
-        I: Stream<Token = u8>,
-        I::Error: ParseError<I::Token, I::Range, I::Position>,
-        I::Position: Default,
-    {
-        if input.count() < LUT_BITS {
-            input.fill_bits()?;
+        if input.count() < 16 {
+            if let Err(()) = input.fill_bits() {
+                return AcResult::Err;
+            }
         }
 
-        let (value, run_size) = self.ac_lut[usize::from(input.peek_bits_u8(LUT_BITS))];
+        let lut_peek = input.peek_bits_u8(LUT_BITS);
+        let (value, run_size) = self.ac_lut[usize::from(lut_peek)];
 
         if run_size != 0 {
             let run = run_size >> 4;
             let size = run_size & 0x0f;
 
             input.consume_bits(size);
-            return Ok(Some((value, run)));
+            return AcResult::Fast(value, run);
         }
 
-        Ok(None)
+        AcResult::Normal(match self.table.decode_inner(input, lut_peek) {
+            Ok(b) => b,
+            Err(()) => return AcResult::Err,
+        })
     }
 }
 

@@ -5,6 +5,7 @@
 // That's why wrapping operators are needed.
 
 use std::{
+    convert::TryFrom,
     mem::{self, MaybeUninit},
     num::Wrapping,
 };
@@ -96,7 +97,7 @@ pub fn dequantize_and_idct_block<'a, I>(
     };
 
     for (chunk, output_chunk) in temp.chunks_exact(8).zip(output) {
-        let chunk = fixed_slice!(chunk; 8);
+        let chunk = <&[_; 8]>::try_from(chunk).unwrap();
 
         // constants scaled things up by 1<<12, plus we had 1<<2 from first
         // loop, plus horizontal and vertical each scale by sqrt(8) so together
@@ -106,9 +107,9 @@ pub fn dequantize_and_idct_block<'a, I>(
         // to encode as 0..255 by adding 128, so we'll add that before the shift
         const X_SCALE: i32 = 65536 + (128 << 17);
 
-        let [s0, s1, s2, s3, s4, s5, s6, s7] = *chunk;
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = chunk;
         if s1.0 == 0 && s2.0 == 0 && s3.0 == 0 && s4.0 == 0 && s5.0 == 0 && s6.0 == 0 && s7.0 == 0 {
-            let dcterm = stbi_clamp((stbi_fsh(s0) + Wrapping(X_SCALE)) >> 17);
+            let dcterm = stbi_clamp((stbi_fsh(*s0) + Wrapping(X_SCALE)) >> 17);
             output_chunk[0] = dcterm;
             output_chunk[1] = dcterm;
             output_chunk[2] = dcterm;

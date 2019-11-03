@@ -1049,45 +1049,46 @@ impl Decoder {
 
             // Section F.1.2.2.1
             loop {
-                if let Some((value, run)) = ac_table
-                    .decode_fast_ac(input)
-                    .map_err(|()| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?
-                {
-                    step!(run);
+                use huffman::AcResult;
+                let (value, run) = match ac_table.decode_fast_ac(input) {
+                    AcResult::Fast(value, run) => (value, run),
+                    AcResult::Normal(byte) => {
+                        let r = byte >> 4;
+                        let s = byte & 0x0f;
 
-                    unzigzag.write(value << scan.low_approximation);
-                    step!(1);
-                } else {
-                    let byte = ac_table
-                        .decode(input)
-                        .map_err(|()| StreamErrorFor::<BiteratorStream<I>>::end_of_input())?;
-                    let r = byte >> 4;
-                    let s = byte & 0x0f;
-
-                    if s == 0 {
-                        match r {
-                            15 => step!(16),
-                            _ => {
-                                *eob_run = (1 << r) - 1;
-
-                                if r > 0 {
-                                    *eob_run += input.next_bits(r).map_err(|()| StreamErrorFor::<BiteratorStream<I>>::message_static_message("out of bits"))?;
+                        if s == 0 {
+                            match r {
+                                15 => {
+                                    step!(16);
+                                    continue;
                                 }
+                                _ => {
+                                    *eob_run = (1 << r) - 1;
 
-                                break;
+                                    if r > 0 {
+                                        *eob_run += input.next_bits(r).map_err(|()| StreamErrorFor::<BiteratorStream<I>>::message_static_message("out of bits"))?;
+                                    }
+
+                                    break;
+                                }
                             }
+                        } else {
+                            (
+                                input.receive_extend(s).map_err(|()| {
+                                    StreamErrorFor::<BiteratorStream<I>>::end_of_input()
+                                })?,
+                                r,
+                            )
                         }
-                    } else {
-                        step!(r);
-
-                        unzigzag.write(
-                            input.receive_extend(s).map_err(|()| {
-                                StreamErrorFor::<BiteratorStream<I>>::end_of_input()
-                            })? << scan.low_approximation,
-                        );
-                        step!(1);
                     }
-                }
+                    AcResult::Err => {
+                        return Err(StreamErrorFor::<BiteratorStream<I>>::end_of_input())
+                    }
+                };
+
+                step!(run);
+                unzigzag.write(value << scan.low_approximation);
+                step!(1);
             }
         }
 

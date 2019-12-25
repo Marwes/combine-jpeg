@@ -1,6 +1,6 @@
 // From https://github.com/kaksmet/jpeg-decoder
 //
-//// Malicious JPEG files can cause operations in the idct to overflow.
+// Malicious JPEG files can cause operations in the idct to overflow.
 // One example is tests/crashtest/images/imagetestsuite/b0b8914cc5f7a6eff409f16d8cc236c5.jpg
 // That's why wrapping operators are needed.
 

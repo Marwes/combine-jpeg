@@ -8,7 +8,7 @@ use {
 
 use combine::{
     attempt, dispatch, easy,
-    error::{Consumed, ParseError, StreamError},
+    error::{Commit, ParseError, StreamError},
     parser,
     parser::{
         byte::num::be_u16,
@@ -1114,9 +1114,9 @@ where [
         (
             parser(move |input: &mut BiteratorStream<'s, I>| {
                 Decoder::decode_row(input)
-                    .map(|()| ((), Consumed::Consumed(())))
+                    .map(|()| ((), Commit::Commit(())))
                     .map_err(|err| {
-                        Consumed::Consumed(
+                        Commit::Commit(
                             <BiteratorStream<I> as StreamOnce>::Error::from_error(input.position(), err)
                                 .into(),
                         )
@@ -1155,7 +1155,7 @@ where [
                 input.state.dc_huffman_tables[usize::from(header.dc_table_selector)].is_none()
             })
         {
-            return Err(Consumed::Consumed(
+            return Err(Commit::Commit(
                 <BiteratorStream<I> as StreamOnce>::Error::from_error(
                     input.position(),
                     StreamErrorFor::<BiteratorStream<I>>::message_static_message(
@@ -1171,7 +1171,7 @@ where [
                 input.state.ac_huffman_tables[usize::from(header.ac_table_selector)].is_none()
             })
         {
-            return Err(Consumed::Consumed(
+            return Err(Commit::Commit(
                 <BiteratorStream<I> as StreamOnce>::Error::from_error(
                     input.position(),
                     StreamErrorFor::<BiteratorStream<I>>::message_static_message(
@@ -1212,7 +1212,7 @@ where [
             }
         }
 
-        Ok(((), Consumed::Empty(())))
+        Ok(((), Commit::Peek(())))
     })
     .then_partial(move |_| factory(move |input: &mut BiteratorStream<'s, I>| {
         let frame = input.state.frame.as_ref().unwrap();
@@ -1257,7 +1257,7 @@ where [
             match marker {
                 Marker::RST(n) => {
                     if n != input.state.scan_state.expected_rst_num {
-                        return Err(Consumed::Consumed(
+                        return Err(Commit::Commit(
                             <DecoderStream<I> as StreamOnce>::Error::from_error(
                                 input.position(),
                                 StreamErrorFor::<DecoderStream<I>>::message_format(format_args!(
@@ -1279,9 +1279,9 @@ where [
                     input.state.scan_state.expected_rst_num =
                         (input.state.scan_state.expected_rst_num + 1) % 8;
                     input.state.scan_state.mcus_left_until_restart = input.state.restart_interval;
-                    Ok(((), Consumed::Empty(())))
+                    Ok(((), Commit::Peek(())))
                 }
-                marker => Err(Consumed::Consumed(
+                marker => Err(Commit::Commit(
                     <DecoderStream<I> as StreamOnce>::Error::from_error(
                         input.position(),
                         StreamErrorFor::<DecoderStream<I>>::message_format(format_args!(

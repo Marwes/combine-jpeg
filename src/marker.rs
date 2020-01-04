@@ -1,6 +1,5 @@
 use combine::{
     error::ParseError,
-    parser,
     parser::{
         byte::{byte, take_until_byte},
         combinator::{any_send_partial_state, AnySendPartialState},
@@ -9,6 +8,7 @@ use combine::{
         token::satisfy_map,
     },
     stream::RangeStream,
+    Parser,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -54,39 +54,37 @@ impl<A> Extend<A> for Sink {
     }
 }
 
-parser! {
-pub struct MarkerParser;
-type PartialState = AnySendPartialState;
-pub fn marker['a, I]()(I) -> Marker
-where [
+pub fn marker<'a, I>(
+) -> impl Parser<I, Output = Marker, PartialState = AnySendPartialState> + crate::Captures<'a>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
-]
 {
-    any_send_partial_state(sep_by1::<Sink, _, _, _>(
-        (
-            take_until_byte(0xFF).map(|_| ()),      // mozjpeg skips any non marker bytes (non 0xFF)
-            take_while1(|b| b == 0xFF).map(|_| ()), // Extraenous 0xFF bytes are allowed
-        ),
-        byte(0x00).expected("stuffed zero"), // When we encounter a 0x00, we found a stuffed zero (FF/00) sequence so we search again
-    )
-    .with(
-        satisfy_map(|b| {
-            Some(match b {
-                0xD8 => Marker::SOI,
-                0xC0..=0xC2 => Marker::SOF(b - 0xC0),
-                0xC4 => Marker::DHT,
-                0xDB => Marker::DQT,
-                0xDD => Marker::DRI,
-                0xDA => Marker::SOS,
-                0xD0..=0xD7 => Marker::RST(b - 0xD0),
-                0xE0..=0xEF => Marker::APP(b - 0xE0),
-                0xD9 => Marker::EOI,
-                0xFE => Marker::COM,
-                _ => return None,
+    any_send_partial_state(
+        sep_by1::<Sink, _, _, _>(
+            (
+                take_until_byte(0xFF).map(|_| ()), // mozjpeg skips any non marker bytes (non 0xFF)
+                take_while1(|b| b == 0xFF).map(|_| ()), // Extraenous 0xFF bytes are allowed
+            ),
+            byte(0x00).expected("stuffed zero"), // When we encounter a 0x00, we found a stuffed zero (FF/00) sequence so we search again
+        )
+        .with(
+            satisfy_map(|b| {
+                Some(match b {
+                    0xD8 => Marker::SOI,
+                    0xC0..=0xC2 => Marker::SOF(b - 0xC0),
+                    0xC4 => Marker::DHT,
+                    0xDB => Marker::DQT,
+                    0xDD => Marker::DRI,
+                    0xDA => Marker::SOS,
+                    0xD0..=0xD7 => Marker::RST(b - 0xD0),
+                    0xE0..=0xEF => Marker::APP(b - 0xE0),
+                    0xD9 => Marker::EOI,
+                    0xFE => Marker::COM,
+                    _ => return None,
+                })
             })
-        })
-        .expected("marker"),
-    ))
-}
+            .expected("marker"),
+        ),
+    )
 }

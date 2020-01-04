@@ -12,7 +12,7 @@ use combine::{
     parser,
     parser::{
         byte::num::be_u16,
-        combinator::{any_send_partial_state, factory, AnySendPartialState},
+        combinator::{any_send_partial_state, factory, no_partial, AnySendPartialState},
         range::{range, take},
         repeat::{count_min_max, iterate, repeat_skip_until},
         token::{any, eof, satisfy, satisfy_map, value},
@@ -113,33 +113,46 @@ where
     any().map(|b| (b >> 4, b & 0x0F))
 }
 
-parser! {
-type PartialState = AnySendPartialState;
-fn segment['a, 's, I, P, O](parser: P)(DecoderStream<'s, I>) -> O
-where [
+#[doc(hidden)]
+pub trait Captures<'a> {}
+impl<T: ?Sized> Captures<'_> for T {}
+
+#[doc(hidden)]
+pub trait Captures2<'a, 'b> {}
+impl<T: ?Sized> Captures2<'_, '_> for T {}
+
+fn segment<'a, 's, I, P, O>(
+    mut parser: P,
+) -> impl Parser<DecoderStream<'s, I>, Output = O, PartialState = AnySendPartialState> + Captures2<'a, 's>
+where
     P: Parser<DecoderStream<'s, I>, Output = O> + 'a,
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
-    DecoderStream<'s, I>: Stream<Token = u8, Range = &'a [u8]>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I: Stream<Token = u8, Range = &'a [u8]>,
+    <DecoderStream<'s, I> as StreamOnce>::Error:
+        ParseError<u8, &'a [u8], <DecoderStream<'s, I> as StreamOnce>::Position>,
     's: 'a,
-]
 {
-    any_send_partial_state(be_u16()
-        .then_partial(|&mut len| take(usize::from(len - 2))) // Check len >= 2
-        .map_input(
-            move |data, self_: &mut DecoderStream<'s, I>| -> Result<_, <DecoderStream<'s, I> as StreamOnce>::Error> {
-                let before = mem::replace(self_.stream.as_inner_mut(), I::from_bytes(data));
+    any_send_partial_state(
+        be_u16()
+            .then_partial(|&mut len| take(usize::from(len - 2))) // Check len >= 2
+            .map_input(
+                move |data,
+                      self_: &mut DecoderStream<'s, I>|
+                      -> Result<_, <DecoderStream<'s, I> as StreamOnce>::Error> {
+                    let before = mem::replace(self_.stream.as_inner_mut(), I::from_bytes(data));
 
-                let result = parser.parse_with_state(self_, &mut Default::default());
+                    let result = parser.parse_with_state(self_, &mut Default::default());
 
-                *self_.stream.as_inner_mut() = before;
+                    *self_.stream.as_inner_mut() = before;
 
-                result
-            },
-        )
-        .flat_map(move |data| -> Result<_, <DecoderStream<'s, I> as StreamOnce>::Error> { data })
-        .message("while decoding segment"))
-}
+                    result
+                },
+            )
+            .flat_map(
+                move |data| -> Result<_, <DecoderStream<'s, I> as StreamOnce>::Error> { data },
+            )
+            .message("while decoding segment"),
+    )
 }
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -207,102 +220,108 @@ pub struct Component {
 
 const MAX_BLOCKS_IN_MCU: u8 = 10; // From mozjpeg
 
-parser! {
-fn sof['a, I](marker_index: u8)(I) -> Frame
-where [
+fn sof<'a, I>(marker_index: u8) -> impl Parser<I, Output = Frame, PartialState = ()>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
-]
 {
-    let marker_index = *marker_index;
-    (any(), be_u16(), be_u16(), any()).then_partial(
-        move |&mut (precision, lines, samples_per_line, components_in_frame)| {
-            let component = (any(), split_4_bit(), any()).map(
-                |(
-                    component_identifier,
-                    (horizontal_sampling_factor, vertical_sampling_factor),
-                    quantization_table_destination_selector,
-                )| Component {
-                    component_identifier,
-                    horizontal_sampling_factor,
-                    vertical_sampling_factor,
-                    quantization_table_destination_selector,
+    no_partial(
+        (any(), be_u16(), be_u16(), any())
+            .then_partial(
+                move |&mut (precision, lines, samples_per_line, components_in_frame)| {
+                    let component = (any(), split_4_bit(), any()).map(
+                        |(
+                            component_identifier,
+                            (horizontal_sampling_factor, vertical_sampling_factor),
+                            quantization_table_destination_selector,
+                        )| Component {
+                            component_identifier,
+                            horizontal_sampling_factor,
+                            vertical_sampling_factor,
+                            quantization_table_destination_selector,
 
-                    blocks_per_mcu: u16::from(horizontal_sampling_factor) * u16::from(vertical_sampling_factor),
-                    mcu_sample_size: Dimensions {
-                        width: u16::from(horizontal_sampling_factor) * DCT_SIZE_U16,
-                        height: u16::from(vertical_sampling_factor) * DCT_SIZE_U16,
-                    },
+                            blocks_per_mcu: u16::from(horizontal_sampling_factor)
+                                * u16::from(vertical_sampling_factor),
+                            mcu_sample_size: Dimensions {
+                                width: u16::from(horizontal_sampling_factor) * DCT_SIZE_U16,
+                                height: u16::from(vertical_sampling_factor) * DCT_SIZE_U16,
+                            },
 
-                    // Filled in later
-                    bytes_per_mcu_line: Default::default(),
-                    line_stride: Default::default(),
-                    block_size: Default::default(),
-                    size: Default::default(),
+                            // Filled in later
+                            bytes_per_mcu_line: Default::default(),
+                            line_stride: Default::default(),
+                            block_size: Default::default(),
+                            size: Default::default(),
+                        },
+                    );
+                    count_min_max(
+                        usize::from(components_in_frame),
+                        usize::from(components_in_frame),
+                        component,
+                    )
+                    .map(move |mut components: Components| {
+                        let mcu_size;
+                        {
+                            let h_max = f32::from(
+                                components
+                                    .iter()
+                                    .map(|c| c.horizontal_sampling_factor)
+                                    .max()
+                                    .unwrap(),
+                            );
+                            let v_max = f32::from(
+                                components
+                                    .iter()
+                                    .map(|c| c.vertical_sampling_factor)
+                                    .max()
+                                    .unwrap(),
+                            );
+
+                            let samples_per_line = f32::from(samples_per_line);
+                            let lines = f32::from(lines);
+
+                            mcu_size = Dimensions {
+                                width: (samples_per_line / (h_max * 8.0)).ceil() as u16,
+                                height: (lines / (v_max * 8.0)).ceil() as u16,
+                            };
+
+                            for component in &mut components[..] {
+                                component.size.width = (f32::from(samples_per_line)
+                                    * (f32::from(component.horizontal_sampling_factor) / h_max))
+                                    .ceil()
+                                    as u16;
+                                component.size.height = (lines
+                                    * (f32::from(component.vertical_sampling_factor) / v_max))
+                                    .ceil()
+                                    as u16;
+
+                                component.block_size.width = mcu_size.width
+                                    * u16::from(component.horizontal_sampling_factor);
+                                component.block_size.height =
+                                    mcu_size.height * u16::from(component.vertical_sampling_factor);
+
+                                let bytes_per_mcu =
+                                    usize::from(component.blocks_per_mcu) * BLOCK_SIZE;
+                                component.bytes_per_mcu_line =
+                                    bytes_per_mcu * usize::from(component.block_size.width);
+                                component.line_stride =
+                                    usize::from(component.block_size.width) * DCT_SIZE;
+                            }
+                        }
+
+                        Frame {
+                            marker_index,
+                            precision,
+                            lines,
+                            samples_per_line,
+                            mcu_size,
+                            components,
+                        }
+                    })
                 },
-            );
-            count_min_max(
-                usize::from(components_in_frame),
-                usize::from(components_in_frame),
-                component,
             )
-            .map(move |mut components: Components| {
-                let mcu_size;
-                {
-                    let h_max = f32::from(
-                        components
-                            .iter()
-                            .map(|c| c.horizontal_sampling_factor)
-                            .max()
-                            .unwrap(),
-                    );
-                    let v_max = f32::from(
-                        components
-                            .iter()
-                            .map(|c| c.vertical_sampling_factor)
-                            .max()
-                            .unwrap(),
-                    );
-
-                    let samples_per_line = f32::from(samples_per_line);
-                    let lines = f32::from(lines);
-
-                    mcu_size = Dimensions {
-                        width: (samples_per_line / (h_max * 8.0)).ceil() as u16,
-                        height: (lines / (v_max * 8.0)).ceil() as u16,
-                    };
-
-                    for component in &mut components[..] {
-                        component.size.width = (f32::from(samples_per_line)
-                            * (f32::from(component.horizontal_sampling_factor) / h_max))
-                            .ceil() as u16;
-                        component.size.height = (lines
-                            * (f32::from(component.vertical_sampling_factor) / v_max))
-                            .ceil() as u16;
-
-                        component.block_size.width =
-                            mcu_size.width * u16::from(component.horizontal_sampling_factor);
-                        component.block_size.height =
-                            mcu_size.height * u16::from(component.vertical_sampling_factor);
-
-                        let bytes_per_mcu = usize::from(component.blocks_per_mcu) * BLOCK_SIZE;
-                        component.bytes_per_mcu_line = bytes_per_mcu * usize::from(component.block_size.width);
-                        component.line_stride = usize::from(component.block_size.width) * DCT_SIZE;
-                    }
-                }
-
-                Frame {
-                    marker_index,
-                    precision,
-                    lines,
-                    samples_per_line,
-                    mcu_size,
-                    components,
-                }
-            })
-        },
-    ).expected("SOF segment")
-}
+            .expected("SOF segment"),
+    )
 }
 
 struct DHT<'a> {
@@ -312,43 +331,46 @@ struct DHT<'a> {
     values: &'a [u8],
 }
 
-parser! {
-fn huffman_table['a, I]()(I) -> DHT<'a>
-where [
+fn huffman_table<'a, I>() -> impl Parser<I, Output = DHT<'a>, PartialState = ()>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
-]
 {
-    (
-        split_4_bit().and_then(
-            |(table_class, destination)| -> Result<_, StreamErrorFor<I>> {
-                Ok((
-                    huffman::TableClass::new(table_class).ok_or_else(|| {
-                        StreamErrorFor::<I>::message_static_message("Invalid huffman table class")
-                    })?,
-                    if usize::from(destination) < MAX_HUFFMAN_TABLES {
-                        destination
-                    } else {
-                        return Err(StreamErrorFor::<I>::message_static_message("Invalid DHT destination identifier"))
-                    },
-                ))
-            },
-        ),
-        take(16).map(|xs: &'a [u8]| fixed_slice!(xs; 16)),
-    )
-        .then_partial(
-            |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8; 16])| {
-                let len = code_lengths.iter().map(|&x| usize::from(x)).sum();
-                take(len).map(move |values| DHT {
-                    table_class,
-                    destination,
-                    code_lengths,
-                    values,
-                })
-            },
+    no_partial(
+        (
+            split_4_bit().and_then(
+                |(table_class, destination)| -> Result<_, StreamErrorFor<I>> {
+                    Ok((
+                        huffman::TableClass::new(table_class).ok_or_else(|| {
+                            StreamErrorFor::<I>::message_static_message(
+                                "Invalid huffman table class",
+                            )
+                        })?,
+                        if usize::from(destination) < MAX_HUFFMAN_TABLES {
+                            destination
+                        } else {
+                            return Err(StreamErrorFor::<I>::message_static_message(
+                                "Invalid DHT destination identifier",
+                            ));
+                        },
+                    ))
+                },
+            ),
+            take(16).map(|xs: &'a [u8]| fixed_slice!(xs; 16)),
         )
-        .expected("Huffman table")
-}
+            .then_partial(
+                |&mut ((table_class, destination), code_lengths): &mut (_, &'a [u8; 16])| {
+                    let len = code_lengths.iter().map(|&x| usize::from(x)).sum();
+                    take(len).map(move |values| DHT {
+                        table_class,
+                        destination,
+                        code_lengths,
+                        values,
+                    })
+                },
+            )
+            .expected("Huffman table"),
+    )
 }
 
 struct UnZigZag<'a, T> {
@@ -453,42 +475,43 @@ impl DQTPrecision {
     }
 }
 
-parser! {
-fn dqt['a, I]()(I) -> DQT
-where [
+fn dqt<'a, I>() -> impl Parser<I, Output = DQT, PartialState = ()> + Captures<'a>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
-]
 {
-    split_4_bit()
-        .and_then(|(precision, identifier)| -> Result<_, StreamErrorFor<I>> {
-            Ok((
-                DQTPrecision::new(precision).ok_or_else(|| {
-                    StreamErrorFor::<I>::message_static_message("Unexpected DQT precision")
-                })?,
-                if usize::from(identifier) < MAX_QUANTIZATION_TABLES {
-                    identifier
-                } else {
-                    return Err(StreamErrorFor::<I>::message_static_message("Invalid DQT destination identifier"))
-                },
-            ))
-        })
-        .then_partial(|&mut (precision, identifier)| match precision {
-            DQTPrecision::Bit8 => count_min_max(64, 64, any())
-                .map(move |mut dqt: DQT| {
-                    dqt.identifier = identifier;
-                    dqt
-                })
-                .left(),
-            DQTPrecision::Bit16 => count_min_max(64, 64, be_u16())
-                .map(move |mut dqt: DQT| {
-                    dqt.identifier = identifier;
-                    dqt
-                })
-                .right(),
-        })
-        .message("DQT")
-}
+    no_partial(
+        split_4_bit()
+            .and_then(|(precision, identifier)| -> Result<_, StreamErrorFor<I>> {
+                Ok((
+                    DQTPrecision::new(precision).ok_or_else(|| {
+                        StreamErrorFor::<I>::message_static_message("Unexpected DQT precision")
+                    })?,
+                    if usize::from(identifier) < MAX_QUANTIZATION_TABLES {
+                        identifier
+                    } else {
+                        return Err(StreamErrorFor::<I>::message_static_message(
+                            "Invalid DQT destination identifier",
+                        ));
+                    },
+                ))
+            })
+            .then_partial(|&mut (precision, identifier)| match precision {
+                DQTPrecision::Bit8 => count_min_max(64, 64, any())
+                    .map(move |mut dqt: DQT| {
+                        dqt.identifier = identifier;
+                        dqt
+                    })
+                    .left(),
+                DQTPrecision::Bit16 => count_min_max(64, 64, be_u16())
+                    .map(move |mut dqt: DQT| {
+                        dqt.identifier = identifier;
+                        dqt
+                    })
+                    .right(),
+            })
+            .message("DQT"),
+    )
 }
 
 fn dri<'a, I>() -> impl Parser<I, Output = u16, PartialState = impl Static> + Send
@@ -515,22 +538,21 @@ struct ScanHeader {
     ac_table_selector: u8,
 }
 
-parser! {
-fn sos_segment['a, 's, I]()(DecoderStream<'s, I>) -> Scan
-where [
+fn sos_segment<'a, 's, I>(
+) -> impl Parser<DecoderStream<'s, I>, Output = Scan, PartialState = ()> + Captures2<'a, 's>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
-    <DecoderStream<'s, I> as StreamOnce>::Error:
-        ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Token,
-            <DecoderStream<'s, I> as StreamOnce>::Range,
-            <DecoderStream<'s, I> as StreamOnce>::Position
-        >,
+    <DecoderStream<'s, I> as StreamOnce>::Error: ParseError<
+        <DecoderStream<'s, I> as StreamOnce>::Token,
+        <DecoderStream<'s, I> as StreamOnce>::Range,
+        <DecoderStream<'s, I> as StreamOnce>::Position,
+    >,
     's: 'a,
-]
 {
     let mut max_index: Option<u8> = None;
+    no_partial(
     (
         satisfy(|i| (1..=(MAX_COMPONENTS as u8)).contains(&i))
             .expected("The number of image components must be be between 1 and 4 (inclusive)")
@@ -608,8 +630,7 @@ where [
                 high_approximation,
                 low_approximation,
             },
-        )
-}
+        ))
 }
 
 struct InputConverter<P> {
@@ -693,60 +714,65 @@ where
     }
 }
 
-parser! {
-type PartialState = AnySendPartialState;
-fn sos['a, 's, I]()(DecoderStream<'s, I>) -> ()
-where [
+fn sos<'a, 's, I>(
+) -> impl Parser<DecoderStream<'s, I>, Output = (), PartialState = AnySendPartialState> + Captures2<'a, 's>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
-    <DecoderStream<'s, I> as StreamOnce>::Error:
-        ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Token,
-            <DecoderStream<'s, I> as StreamOnce>::Range,
-            <DecoderStream<'s, I> as StreamOnce>::Position
-        >,
+    <DecoderStream<'s, I> as StreamOnce>::Error: ParseError<
+        <DecoderStream<'s, I> as StreamOnce>::Token,
+        <DecoderStream<'s, I> as StreamOnce>::Range,
+        <DecoderStream<'s, I> as StreamOnce>::Position,
+    >,
     I::Position: Default + fmt::Display,
     's: 'a,
-]
 {
     any_send_partial_state(
         segment(sos_segment())
-        .map_input(move |scan: Scan, input: &mut DecoderStream<'s, I>| -> Result<bool, <DecoderStream<'s, I> as StreamOnce>::Error> {
-            input.state.scan = Some(scan);
-            let scan = input.0.state.scan.as_ref().unwrap();
+            .map_input(
+                move |scan: Scan,
+                      input: &mut DecoderStream<'s, I>|
+                      -> Result<bool, <DecoderStream<'s, I> as StreamOnce>::Error> {
+                    input.state.scan = Some(scan);
+                    let scan = input.0.state.scan.as_ref().unwrap();
 
-            // FIXME Propagate error
-            let frame = input.0.state.frame.as_ref().ok_or_else(|| {
-                <DecoderStream<'s, I> as StreamOnce>::Error::from_error(
-                    input.position(),
-                    StreamErrorFor::<DecoderStream<'s, I>>::message_static_message("Found SOS before SOF"),
-                )
-            })?;
-            if frame.coding_process() == CodingProcess::Progressive {
-                unimplemented!();
-            }
-
-            if scan.low_approximation == 0 {
-                for i in scan.headers.iter().map(|header| header.component_index) {
-                    for j in scan.start_of_selection..=scan.end_of_selection {
-                        input.0.state.coefficients_finished[usize::from(i)] |= 1 << j;
+                    // FIXME Propagate error
+                    let frame = input.0.state.frame.as_ref().ok_or_else(|| {
+                        <DecoderStream<'s, I> as StreamOnce>::Error::from_error(
+                            input.position(),
+                            StreamErrorFor::<DecoderStream<'s, I>>::message_static_message(
+                                "Found SOS before SOF",
+                            ),
+                        )
+                    })?;
+                    if frame.coding_process() == CodingProcess::Progressive {
+                        unimplemented!();
                     }
-                }
-            }
 
-            let is_final_scan = scan.headers.iter().all(|header| {
-                input.0.state.coefficients_finished[usize::from(header.component_index)] == !0
-            });
-            Ok(is_final_scan)
-        })
-        .flat_map(move |data| -> Result<bool, <DecoderStream<'s, I> as StreamOnce>::Error> { data })
-        .then_partial(move |&mut is_final_scan: &mut bool| InputConverter {
-            parser: decode_scan(is_final_scan)
-                .map_input(|iter, input| input.state.planes = iter),
-        })
+                    if scan.low_approximation == 0 {
+                        for i in scan.headers.iter().map(|header| header.component_index) {
+                            for j in scan.start_of_selection..=scan.end_of_selection {
+                                input.0.state.coefficients_finished[usize::from(i)] |= 1 << j;
+                            }
+                        }
+                    }
+
+                    let is_final_scan = scan.headers.iter().all(|header| {
+                        input.0.state.coefficients_finished[usize::from(header.component_index)]
+                            == !0
+                    });
+                    Ok(is_final_scan)
+                },
+            )
+            .flat_map(
+                move |data| -> Result<bool, <DecoderStream<'s, I> as StreamOnce>::Error> { data },
+            )
+            .then_partial(move |&mut is_final_scan: &mut bool| InputConverter {
+                parser: decode_scan(is_final_scan)
+                    .map_input(|iter, input| input.state.planes = iter),
+            }),
     )
-}
 }
 
 trait Static: Send + Default + 'static {}
@@ -760,25 +786,24 @@ enum AdobeColorTransform {
     YCCK = 2,
 }
 
-parser! {
-fn app_adobe['a, I]()(I) -> AdobeColorTransform
-where [
+fn app_adobe<'a, I>() -> impl Parser<I, Output = AdobeColorTransform, PartialState = ()>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
-]
 {
-    range(&b"Adobe\0"[..]).skip(take(5)).with(
-        satisfy_map(|b| {
-            Some(match b {
-                0 => AdobeColorTransform::Unknown,
-                1 => AdobeColorTransform::YCbCr,
-                2 => AdobeColorTransform::YCCK,
-                _ => return None,
+    no_partial(
+        range(&b"Adobe\0"[..]).skip(take(5)).with(
+            satisfy_map(|b| {
+                Some(match b {
+                    0 => AdobeColorTransform::Unknown,
+                    1 => AdobeColorTransform::YCbCr,
+                    2 => AdobeColorTransform::YCCK,
+                    _ => return None,
+                })
             })
-        })
-        .expected("Adobe color transform"),
+            .expected("Adobe color transform"),
+        ),
     )
-}
 }
 
 const MAX_HUFFMAN_TABLES: usize = 4;
@@ -1096,162 +1121,164 @@ impl Decoder {
     }
 }
 
-parser! {
-type PartialState = AnySendPartialState;
-fn iteration_decode_scanner['a, 's, I](
+fn iteration_decode_scanner<'a, 's, I>(
     produce_data: bool,
-    mcu_size: Dimensions
-)(BiteratorStream<'s, I>) -> ()
-where [
+    mcu_size: Dimensions,
+) -> impl Parser<BiteratorStream<'s, I>, Output = (), PartialState = AnySendPartialState>
+       + Captures2<'a, 's>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default + fmt::Display,
     's: 'a,
-]
 {
-    let produce_data = *produce_data;
-    any_send_partial_state(iterate::<(), _, _, _, _>(iproduct!(0..mcu_size.height, 0..mcu_size.width), move |&(mcu_y, mcu_x), _| {
-        (
-            parser(move |input: &mut BiteratorStream<'s, I>| {
-                Decoder::decode_row(input)
-                    .map(|()| ((), Commit::Commit(())))
-                    .map_err(|err| {
-                        Commit::Commit(
-                            <BiteratorStream<I> as StreamOnce>::Error::from_error(input.position(), err)
+    any_send_partial_state(iterate::<(), _, _, _, _>(
+        iproduct!(0..mcu_size.height, 0..mcu_size.width),
+        move |&(mcu_y, mcu_x), _| {
+            (
+                parser(move |input: &mut BiteratorStream<'s, I>| {
+                    Decoder::decode_row(input)
+                        .map(|()| ((), Commit::Commit(())))
+                        .map_err(|err| {
+                            Commit::Commit(
+                                <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                                    input.position(),
+                                    err,
+                                )
                                 .into(),
-                        )
-                    })
-            }),
-            restart_parser(mcu_x, mcu_y),
-        )
-        .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
-            if produce_data {
-                input.state.dequantize(mcu_x, mcu_y);
-            }
-        })
-    }))
-}
+                            )
+                        })
+                }),
+                restart_parser(mcu_x, mcu_y),
+            )
+                .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
+                    if produce_data {
+                        input.state.dequantize(mcu_x, mcu_y);
+                    }
+                })
+        },
+    ))
 }
 
-parser! {
-type PartialState = AnySendPartialState;
-fn decode_scan['s, 'a, I](
-    produce_data: bool
-)(BiteratorStream<'s, I>) -> ComponentVec<Vec<u8>>
-where [
+fn decode_scan<'s, 'a, I>(
+    produce_data: bool,
+) -> impl Parser<
+    BiteratorStream<'s, I>,
+    Output = ComponentVec<Vec<u8>>,
+    PartialState = AnySendPartialState,
+> + Captures2<'s, 'a>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default + fmt::Display,
     's: 'a,
-]
 {
-    let produce_data = *produce_data;
-    any_send_partial_state(parser(move |input: &mut BiteratorStream<'s, I>| {
-        let frame = input.state.frame.as_ref().unwrap();
-        let scan = input.state.scan.as_ref().unwrap();
+    any_send_partial_state(
+        parser(move |input: &mut BiteratorStream<'s, I>| {
+            let frame = input.state.frame.as_ref().unwrap();
+            let scan = input.state.scan.as_ref().unwrap();
 
-        if scan.start_of_selection == 0
-            && scan.headers.iter().any(|header| {
-                input.state.dc_huffman_tables[usize::from(header.dc_table_selector)].is_none()
-            })
-        {
-            return Err(Commit::Commit(
-                <BiteratorStream<I> as StreamOnce>::Error::from_error(
-                    input.position(),
-                    StreamErrorFor::<BiteratorStream<I>>::message_static_message(
-                        "scan uses unset dc huffman table",
-                    ),
-                )
-                .into(),
-            ));
-        }
-
-        if scan.end_of_selection > 1
-            && scan.headers.iter().any(|header| {
-                input.state.ac_huffman_tables[usize::from(header.ac_table_selector)].is_none()
-            })
-        {
-            return Err(Commit::Commit(
-                <BiteratorStream<I> as StreamOnce>::Error::from_error(
-                    input.position(),
-                    StreamErrorFor::<BiteratorStream<I>>::message_static_message(
-                        "scan uses unset ac huffman table",
-                    ),
-                )
-                .into(),
-            ));
-        }
-
-        input.state.scan_state = ScanState {
-            dc_predictors: [0i16; MAX_COMPONENTS],
-            eob_run: 0,
-            expected_rst_num: 0,
-            mcus_left_until_restart: input.state.restart_interval,
-            mcu_row_coefficients: [0; MAX_BLOCKS_IN_MCU as usize * BLOCK_SIZE],
-            results: Default::default(),
-        };
-
-        if produce_data {
-            let results = &mut input.state.scan_state.results;
-
-            while results.len() < frame.components.len() {
-                results.push(Vec::new());
-            }
-            while results.len() > frame.components.len() {
-                results.pop();
+            if scan.start_of_selection == 0
+                && scan.headers.iter().any(|header| {
+                    input.state.dc_huffman_tables[usize::from(header.dc_table_selector)].is_none()
+                })
+            {
+                return Err(Commit::Commit(
+                    <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                        input.position(),
+                        StreamErrorFor::<BiteratorStream<I>>::message_static_message(
+                            "scan uses unset dc huffman table",
+                        ),
+                    )
+                    .into(),
+                ));
             }
 
-            for (component, result) in frame.components.iter().zip(results) {
-                let size = component.block_size.area() * BLOCK_SIZE;
+            if scan.end_of_selection > 1
+                && scan.headers.iter().any(|header| {
+                    input.state.ac_huffman_tables[usize::from(header.ac_table_selector)].is_none()
+                })
+            {
+                return Err(Commit::Commit(
+                    <BiteratorStream<I> as StreamOnce>::Error::from_error(
+                        input.position(),
+                        StreamErrorFor::<BiteratorStream<I>>::message_static_message(
+                            "scan uses unset ac huffman table",
+                        ),
+                    )
+                    .into(),
+                ));
+            }
 
-                // TODO perf: memset costs a few percent performance for no win
-                result.reserve(size);
-                unsafe {
-                    result.set_len(size);
+            input.state.scan_state = ScanState {
+                dc_predictors: [0i16; MAX_COMPONENTS],
+                eob_run: 0,
+                expected_rst_num: 0,
+                mcus_left_until_restart: input.state.restart_interval,
+                mcu_row_coefficients: [0; MAX_BLOCKS_IN_MCU as usize * BLOCK_SIZE],
+                results: Default::default(),
+            };
+
+            if produce_data {
+                let results = &mut input.state.scan_state.results;
+
+                while results.len() < frame.components.len() {
+                    results.push(Vec::new());
+                }
+                while results.len() > frame.components.len() {
+                    results.pop();
+                }
+
+                for (component, result) in frame.components.iter().zip(results) {
+                    let size = component.block_size.area() * BLOCK_SIZE;
+
+                    // TODO perf: memset costs a few percent performance for no win
+                    result.reserve(size);
+                    unsafe {
+                        result.set_len(size);
+                    }
                 }
             }
-        }
 
-        Ok(((), Commit::Peek(())))
-    })
-    .then_partial(move |_| factory(move |input: &mut BiteratorStream<'s, I>| {
-        let frame = input.state.frame.as_ref().unwrap();
-        iteration_decode_scanner(produce_data, frame.mcu_size)
-    }))
-    .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
-        let results = &mut input.state.scan_state.results;
-        input
-            .state
-            .scan
-            .as_ref()
-            .unwrap()
-            .headers
-            .iter()
-            .map(move |header| {
-                mem::replace(
-                    &mut results[usize::from(header.component_index)],
-                    Default::default(),
-                )
+            Ok(((), Commit::Peek(())))
+        })
+        .then_partial(move |_| {
+            factory(move |input: &mut BiteratorStream<'s, I>| {
+                let frame = input.state.frame.as_ref().unwrap();
+                iteration_decode_scanner(produce_data, frame.mcu_size)
             })
-            .collect()
-    }))
-}
+        })
+        .map_input(move |_, input: &mut BiteratorStream<'s, I>| {
+            let results = &mut input.state.scan_state.results;
+            input
+                .state
+                .scan
+                .as_ref()
+                .unwrap()
+                .headers
+                .iter()
+                .map(move |header| {
+                    mem::replace(
+                        &mut results[usize::from(header.component_index)],
+                        Default::default(),
+                    )
+                })
+                .collect()
+        }),
+    )
 }
 
-parser! {
-type PartialState = AnySendPartialState;
-fn restart_parser['s, 'a, I](
+fn restart_parser<'s, 'a, I>(
     mcu_x: u16,
-    mcu_y: u16
-)(BiteratorStream<'s, I>) -> ()
-where [
+    mcu_y: u16,
+) -> impl Parser<BiteratorStream<'s, I>, Output = (), PartialState = AnySendPartialState>
+       + Captures2<'a, 's>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Position: Default + fmt::Display,
     's: 'a,
-]
 {
-    let (mcu_x, mcu_y) = (*mcu_x, *mcu_y);
     let handle_marker = move |marker: Marker| {
         parser(move |input: &mut DecoderStream<'s, I>| {
             match marker {
@@ -1303,7 +1330,9 @@ where [
                 input.state.scan_state.mcus_left_until_restart -= 1;
 
                 if input.state.scan_state.mcus_left_until_restart == 0 && !is_last_mcu {
-                    marker().then_partial(move |&mut marker| handle_marker(marker)).left()
+                    marker()
+                        .then_partial(move |&mut marker| handle_marker(marker))
+                        .left()
                 } else {
                     value(()).right()
                 }
@@ -1313,31 +1342,31 @@ where [
         }),
     })
 }
-}
 
-parser! {
-type PartialState = AnySendPartialState;
-pub fn decode_parser['a, 's, I]()(DecoderStream<'s, I>) -> Result<Vec<u8>>
-where [
+pub fn decode_parser<'a, 's, I>(
+) -> impl Parser<DecoderStream<'s, I>, Output = Result<Vec<u8>>, PartialState = AnySendPartialState>
+       + Captures2<'a, 's>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
-    <DecoderStream<'s, I> as StreamOnce>::Error:
-        ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Token,
-            <DecoderStream<'s, I> as StreamOnce>::Range,
-            <DecoderStream<'s, I> as StreamOnce>::Position
-        >,
+    <DecoderStream<'s, I> as StreamOnce>::Error: ParseError<
+        <DecoderStream<'s, I> as StreamOnce>::Token,
+        <DecoderStream<'s, I> as StreamOnce>::Range,
+        <DecoderStream<'s, I> as StreamOnce>::Position,
+    >,
     I::Position: Default + fmt::Display,
     's: 'a,
-]
 {
-    any_send_partial_state(repeat_skip_until(
+    any_send_partial_state(
+        repeat_skip_until(
             marker().then_partial(move |&mut marker| do_segment(marker)),
             attempt(marker().and_then(|marker| match marker {
                 Marker::EOI => Ok(()),
-                _ => Err(StreamErrorFor::<DecoderStream<I>>::message_static_message(""))
-            }))
+                _ => Err(StreamErrorFor::<DecoderStream<I>>::message_static_message(
+                    "",
+                )),
+            })),
         )
         .skip(marker()) // EOI Marker
         .map_input(|_, input: &mut DecoderStream<'s, I>| {
@@ -1355,23 +1384,24 @@ where [
                 is_jfif,
                 input.state.color_transform,
             )?;
-            let upsampler = upsampler::Upsampler::new(
-                &frame.components,
-                frame.samples_per_line,
-                frame.lines,
-            )?;
+            let upsampler =
+                upsampler::Upsampler::new(&frame.components, frame.samples_per_line, frame.lines)?;
             let line_size = width * frame.components.len();
             let mut image = vec![0u8; line_size * height];
 
-
             let f = |line_buffers: &mut ComponentVec<_>, row: usize, line: &mut [u8]| {
                 let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
-                colors.extend(upsampler.upsample_and_interleave_row(line_buffers, data, row, width));
+                colors.extend(upsampler.upsample_and_interleave_row(
+                    line_buffers,
+                    data,
+                    row,
+                    width,
+                ));
 
                 color_convert_func(line, &colors);
             };
 
-            let mut line_buffers =  ComponentVec::new();
+            let mut line_buffers = ComponentVec::new();
             line_buffers.extend(std::iter::repeat(Vec::new()).take(4));
 
             #[cfg(not(feature = "rayon"))]
@@ -1384,40 +1414,37 @@ where [
 
             #[cfg(feature = "rayon")]
             {
-                image
-                    .par_chunks_mut(line_size)
-                    .enumerate()
-                    .for_each_with(line_buffers, |line_buffers, (row, line)| {
+                image.par_chunks_mut(line_size).enumerate().for_each_with(
+                    line_buffers,
+                    |line_buffers, (row, line)| {
                         f(line_buffers, row, line);
-                    });
+                    },
+                );
             }
 
-
             Ok(image)
-        }))
-}
+        }),
+    )
 }
 
-parser! {
-type PartialState = AnySendPartialState;
-fn do_segment['a, 's, I](marker: Marker)(DecoderStream<'s, I>) -> ()
-where [
+fn do_segment<'a, 's, I>(
+    marker: Marker,
+) -> impl Parser<DecoderStream<'s, I>, Output = (), PartialState = AnySendPartialState> + Captures2<'a, 's>
+where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
-    <DecoderStream<'s, I> as StreamOnce>::Error:
-        ParseError<
-            <DecoderStream<'s, I> as StreamOnce>::Token,
-            <DecoderStream<'s, I> as StreamOnce>::Range,
-            <DecoderStream<'s, I> as StreamOnce>::Position
-        >,
+    <DecoderStream<'s, I> as StreamOnce>::Error: ParseError<
+        <DecoderStream<'s, I> as StreamOnce>::Token,
+        <DecoderStream<'s, I> as StreamOnce>::Range,
+        <DecoderStream<'s, I> as StreamOnce>::Position,
+    >,
     I::Position: Default + fmt::Display,
     's: 'a,
-]
 {
     log::trace!("Segment {:?}", marker);
 
-    any_send_partial_state(dispatch!(*marker;
+    any_send_partial_state(dispatch!(marker;
         Marker::SOI | Marker::RST(_) | Marker::COM | Marker::EOI => value(()),
         Marker::SOF(i) => segment(sof(i)).map_input(move |frame, self_: &mut DecoderStream<'s, I>| self_.state.frame = Some(frame)),
         Marker::DHT => {
@@ -1447,7 +1474,6 @@ where [
         },
         Marker::APP(_) => segment(value(())),
     ))
-}
 }
 
 pub fn decode(input: &[u8]) -> Result<Vec<u8>> {

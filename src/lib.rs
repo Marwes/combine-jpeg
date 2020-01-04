@@ -2,7 +2,7 @@ use std::{fmt, io::BufRead, mem};
 
 use {
     arrayvec::ArrayVec,
-    bytes::BytesMut,
+    bytes::{Buf, BytesMut},
     itertools::{iproduct, izip},
 };
 
@@ -1496,7 +1496,7 @@ impl DecoderCodec {
     }
 }
 
-impl tokio_codec::Decoder for DecoderCodec {
+impl tokio_util::codec::Decoder for DecoderCodec {
     type Item = Vec<u8>;
     type Error = IoError;
 

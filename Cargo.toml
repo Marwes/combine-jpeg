@@ -15,9 +15,8 @@ itertools = "0.8"
 log = "0.4"
 rayon = { version = "1", optional = true }
 
-bytes = "0.4"
-tokio-io = "0.1"
-tokio-codec = "0.1"
+bytes = "0.5"
+tokio-util = { version = "0.2", features = ["codec"] }
 
 [dev-dependencies]
 criterion = { version = "0.3", default-features = false }
@@ -26,8 +25,8 @@ image = { version = "0.21", default-features = false, features = ["png_codec"] }
 partial-io = { version = "0.3", features = ["quickcheck", "tokio"] }
 quickcheck = "0.6"
 quickcheck_macros = "0.8"
-futures = "0.1"
-tokio = "0.1"
+futures = "0.3"
+tokio = "0.2"
 
 mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
 jpeg-decoder = { version = "0.1", default-features = false } # Disable multithreaded decoding since no other decoder uses it

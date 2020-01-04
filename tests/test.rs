@@ -1,11 +1,13 @@
 use std::{fs, io::BufReader, iter, path::Path};
 
 use futures::prelude::*;
-use partial_io::{
-    GenNoErrors, GenWouldBlock, PartialAsyncRead, PartialOp, PartialRead, PartialWithErrors,
-};
+use partial_io::{GenNoErrors, GenWouldBlock, PartialOp, PartialRead, PartialWithErrors};
 
 use combine_jpeg::*;
+
+use support::*;
+
+mod support;
 
 fn test_decode(name: &str) -> Vec<u8> {
     let in_path = Path::new("tests/images").join(name).with_extension("jpg");
@@ -152,10 +154,10 @@ fn partial_async_read_green(seq: PartialWithErrors<GenWouldBlock>) {
     let input = fs::read("tests/images/green.jpg").unwrap();
     let reader = PartialAsyncRead::new(&input[..], seq);
     let codec = combine_jpeg::DecoderCodec::default();
-    let out = tokio_codec::FramedRead::new(reader, codec)
-        .collect()
-        .wait()
-        .unwrap();
+    let out = futures::executor::block_on(
+        tokio_util::codec::FramedRead::new(reader, codec).try_collect::<Vec<_>>(),
+    )
+    .unwrap();
 
     assert_eq!(out.len(), 1);
 
@@ -191,10 +193,10 @@ fn partial_async_read_simple(seq: PartialWithErrors<GenWouldBlock>) {
     let input = fs::read("tests/images/simple.jpg").unwrap();
     let reader = PartialAsyncRead::new(&input[..], seq);
     let codec = combine_jpeg::DecoderCodec::default();
-    let out = tokio_codec::FramedRead::new(reader, codec)
-        .collect()
-        .wait()
-        .unwrap();
+    let out = futures::executor::block_on(
+        tokio_util::codec::FramedRead::new(reader, codec).try_collect::<Vec<_>>(),
+    )
+    .unwrap();
 
     assert_eq!(out.len(), 1);
 
@@ -221,14 +223,15 @@ fn simple_partial() {
     let input = fs::read("tests/images/simple.jpg").unwrap();
     let reader = PartialAsyncRead::new(&input[..], seq);
     let codec = combine_jpeg::DecoderCodec::default();
-    let out = tokio_codec::FramedRead::new(reader, codec)
-        .map(|x| {
-            println!("Decoded `{:?}`", x);
-            x
-        })
-        .collect()
-        .wait()
-        .unwrap();
+    let out = futures::executor::block_on(
+        tokio_util::codec::FramedRead::new(reader, codec)
+            .map(|x| {
+                println!("Decoded `{:?}`", x);
+                x
+            })
+            .try_collect::<Vec<_>>(),
+    )
+    .unwrap();
 
     assert_eq!(out.len(), 1);
 

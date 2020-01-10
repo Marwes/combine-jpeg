@@ -198,7 +198,7 @@ impl Frame {
     }
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub struct Component {
     pub component_identifier: u8,
     pub horizontal_sampling_factor: u8,
@@ -303,7 +303,7 @@ where
                                 let bytes_per_mcu =
                                     usize::from(component.blocks_per_mcu) * BLOCK_SIZE;
                                 component.bytes_per_mcu_line =
-                                    bytes_per_mcu * usize::from(component.block_size.width);
+                                    bytes_per_mcu * usize::from(mcu_size.width);
                                 component.line_stride =
                                     usize::from(component.block_size.width) * DCT_SIZE;
                             }

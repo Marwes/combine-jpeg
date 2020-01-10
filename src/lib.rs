@@ -919,25 +919,50 @@ impl Decoder {
 
             let mcu_offset = usize::from(mcu_y) * component.bytes_per_mcu_line
                 + usize::from(mcu_x) * usize::from(component.mcu_sample_size.width);
-            let component_result = &mut result[mcu_offset..];
 
-            for y_offset in (0..usize::from(component.mcu_sample_size.height)
-                * component.line_stride)
-                .step_by(component.line_stride * DCT_SIZE)
-            {
-                let component_result_start = &mut component_result[y_offset..];
+            if result.len() >= mcu_offset {
+                let component_result = &mut result[mcu_offset..];
 
-                for x in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE) {
-                    let coefficients_chunk =
+                for y_offset in (0..usize::from(component.mcu_sample_size.height)
+                    * component.line_stride)
+                    .step_by(component.line_stride * DCT_SIZE)
+                {
+                    if component_result.len() >= y_offset {
+                        let component_result_start = &mut component_result[y_offset..];
+
+                        for x in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE)
+                        {
+                            let coefficients_chunk =
+                                coefficients_chunks.next().expect("Missing coefficients");
+                            if component_result_start.len() >= x {
+                                let output = component_result_start[x..]
+                                    .chunks_mut(component.line_stride)
+                                    .map(
+                                        |chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE),
+                                    );
+                                if output.len() >= 8 {
+                                    idct::dequantize_and_idct_block(
+                                        fixed_slice!(coefficients_chunk; BLOCK_SIZE),
+                                        &quantization_table.0,
+                                        output,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        for _ in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE)
+                        {
+                            coefficients_chunks.next().expect("Missing coefficients");
+                        }
+                    }
+                }
+            } else {
+                for _ in (0..usize::from(component.mcu_sample_size.height) * component.line_stride)
+                    .step_by(component.line_stride * DCT_SIZE)
+                {
+                    for _ in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE) {
                         coefficients_chunks.next().expect("Missing coefficients");
-                    let output = component_result_start[x..]
-                        .chunks_mut(component.line_stride)
-                        .map(|chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE));
-                    idct::dequantize_and_idct_block(
-                        fixed_slice!(coefficients_chunk; BLOCK_SIZE),
-                        &quantization_table.0,
-                        output,
-                    );
+                    }
                 }
             }
         }

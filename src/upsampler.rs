@@ -7,7 +7,7 @@ pub(crate) struct Upsampler {
 }
 
 struct UpsamplerComponent {
-    upsampler: Box<dyn Upsample + Sync>,
+    upsampler: Upsample,
     width: usize,
     height: usize,
     row_stride: usize,
@@ -43,7 +43,7 @@ impl Upsampler {
                         output_height,
                     )?;
                     Ok(UpsamplerComponent {
-                        upsampler: upsampler,
+                        upsampler,
                         width: component.size.width as usize,
                         height: component.size.height as usize,
                         row_stride: component.block_size.width as usize * 8,
@@ -95,20 +95,20 @@ fn choose_upsampler(
     max_sampling_factors: (u8, u8),
     output_width: u16,
     output_height: u16,
-) -> Result<Box<dyn Upsample + Sync>> {
+) -> Result<Upsample> {
     let h1 = sampling_factors.0 == max_sampling_factors.0 || output_width == 1;
     let v1 = sampling_factors.1 == max_sampling_factors.1 || output_height == 1;
     let h2 = sampling_factors.0 * 2 == max_sampling_factors.0;
     let v2 = sampling_factors.1 * 2 == max_sampling_factors.1;
 
     if h1 && v1 {
-        Ok(Box::new(UpsamplerH1V1))
+        Ok(Upsample::H1V1)
     } else if h2 && v1 {
-        Ok(Box::new(UpsamplerH2V1))
+        Ok(Upsample::H2V1)
     } else if h1 && v2 {
-        Ok(Box::new(UpsamplerH1V2))
+        Ok(Upsample::H1V2)
     } else if h2 && v2 {
-        Ok(Box::new(UpsamplerH2V2))
+        Ok(Upsample::H2V2)
     } else {
         if max_sampling_factors.0 % sampling_factors.0 != 0
             || max_sampling_factors.1 % sampling_factors.1 != 0
@@ -117,7 +117,7 @@ fn choose_upsampler(
                 UnsupportedFeature::NonIntegerSubsamplingRatio,
             ))
         } else {
-            Ok(Box::new(UpsamplerGeneric {
+            Ok(Upsample::Generic(UpsamplerGeneric {
                 horizontal_scaling_factor: max_sampling_factors.0 / sampling_factors.0,
                 vertical_scaling_factor: max_sampling_factors.1 / sampling_factors.1,
             }))
@@ -125,7 +125,15 @@ fn choose_upsampler(
     }
 }
 
-trait Upsample: Send + Sync {
+enum Upsample {
+    H1V1,
+    H2V1,
+    H1V2,
+    H2V2,
+    Generic(UpsamplerGeneric),
+}
+
+impl Upsample {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
@@ -135,10 +143,58 @@ trait Upsample: Send + Sync {
         row: usize,
         output_width: usize,
         output: &'s mut Vec<u8>,
-    ) -> &'s [u8];
+    ) -> &'s [u8] {
+        match self {
+            Self::H1V1 => UpsamplerH1V1.upsample_row(
+                input,
+                input_width,
+                input_height,
+                row_stride,
+                row,
+                output_width,
+                output,
+            ),
+            Self::H2V1 => UpsamplerH2V1.upsample_row(
+                input,
+                input_width,
+                input_height,
+                row_stride,
+                row,
+                output_width,
+                output,
+            ),
+            Self::H1V2 => UpsamplerH1V2.upsample_row(
+                input,
+                input_width,
+                input_height,
+                row_stride,
+                row,
+                output_width,
+                output,
+            ),
+            Self::H2V2 => UpsamplerH2V2.upsample_row(
+                input,
+                input_width,
+                input_height,
+                row_stride,
+                row,
+                output_width,
+                output,
+            ),
+            Self::Generic(upsample) => upsample.upsample_row(
+                input,
+                input_width,
+                input_height,
+                row_stride,
+                row,
+                output_width,
+                output,
+            ),
+        }
+    }
 }
 
-impl Upsample for UpsamplerH1V1 {
+impl UpsamplerH1V1 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
@@ -154,7 +210,7 @@ impl Upsample for UpsamplerH1V1 {
     }
 }
 
-impl Upsample for UpsamplerH2V1 {
+impl UpsamplerH2V1 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
@@ -193,7 +249,7 @@ impl Upsample for UpsamplerH2V1 {
     }
 }
 
-impl Upsample for UpsamplerH1V2 {
+impl UpsamplerH1V2 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
@@ -224,7 +280,7 @@ impl Upsample for UpsamplerH1V2 {
     }
 }
 
-impl Upsample for UpsamplerH2V2 {
+impl UpsamplerH2V2 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
@@ -273,7 +329,7 @@ impl Upsample for UpsamplerH2V2 {
     }
 }
 
-impl Upsample for UpsamplerGeneric {
+impl UpsamplerGeneric {
     // Uses nearest neighbor sampling
     fn upsample_row<'s>(
         &self,

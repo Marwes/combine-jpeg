@@ -149,6 +149,12 @@ const EXPECTED_SIMPLE: &[u8] = &[
     253, 255, 252, 255, 255, 255,
 ];
 
+#[test]
+fn simple_vertical() {
+    let out = test_decode("simple-vertical");
+    assert_eq!(out, &EXPECTED_SIMPLE[..]);
+}
+
 #[quickcheck_macros::quickcheck]
 fn partial_async_read_green(seq: PartialWithErrors<GenWouldBlock>) {
     let input = fs::read("tests/images/green.jpg").unwrap();

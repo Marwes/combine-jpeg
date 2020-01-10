@@ -934,35 +934,26 @@ impl Decoder {
                         {
                             let coefficients_chunk =
                                 coefficients_chunks.next().expect("Missing coefficients");
-                            if component_result_start.len() >= x {
-                                let output = component_result_start[x..]
-                                    .chunks_mut(component.line_stride)
-                                    .map(
-                                        |chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE),
-                                    );
-                                if output.len() >= 8 {
-                                    idct::dequantize_and_idct_block(
-                                        fixed_slice!(coefficients_chunk; BLOCK_SIZE),
-                                        &quantization_table.0,
-                                        output,
-                                    );
-                                }
-                            }
+                            let output = component_result_start[x..]
+                                .chunks_mut(component.line_stride)
+                                .map(|chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE));
+                            idct::dequantize_and_idct_block(
+                                fixed_slice!(coefficients_chunk; BLOCK_SIZE),
+                                &quantization_table.0,
+                                output,
+                            );
                         }
                     } else {
-                        for _ in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE)
-                        {
+                        for _ in 0..component.horizontal_sampling_factor {
                             coefficients_chunks.next().expect("Missing coefficients");
                         }
                     }
                 }
             } else {
-                for _ in (0..usize::from(component.mcu_sample_size.height) * component.line_stride)
-                    .step_by(component.line_stride * DCT_SIZE)
+                for _ in 0..(usize::from(component.vertical_sampling_factor)
+                    * usize::from(component.horizontal_sampling_factor))
                 {
-                    for _ in (0..usize::from(component.mcu_sample_size.width)).step_by(DCT_SIZE) {
-                        coefficients_chunks.next().expect("Missing coefficients");
-                    }
+                    coefficients_chunks.next().expect("Missing coefficients");
                 }
             }
         }

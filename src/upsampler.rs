@@ -1,4 +1,4 @@
-use crate::{Component, ComponentVec, Error, Result, UnsupportedFeature};
+use crate::{Component, ComponentVec, Dimensions, Error, Result, UnsupportedFeature};
 
 use itertools::izip;
 
@@ -8,17 +8,12 @@ pub(crate) struct Upsampler {
 
 struct UpsamplerComponent {
     upsampler: Upsample,
-    width: usize,
-    height: usize,
+    size: Dimensions,
     row_stride: usize,
 }
 
 impl Upsampler {
-    pub fn new(
-        components: &[Component],
-        output_width: u16,
-        output_height: u16,
-    ) -> Result<Upsampler> {
+    pub fn new(components: &[Component], output_size: Dimensions) -> Result<Upsampler> {
         let h_max = components
             .iter()
             .map(|c| c.horizontal_sampling_factor)
@@ -39,13 +34,11 @@ impl Upsampler {
                             component.vertical_sampling_factor,
                         ),
                         (h_max, v_max),
-                        output_width,
-                        output_height,
+                        output_size,
                     )?;
                     Ok(UpsamplerComponent {
                         upsampler,
-                        width: component.size.width as usize,
-                        height: component.size.height as usize,
+                        size: component.size,
                         row_stride: component.block_size.width as usize * 8,
                     })
                 })
@@ -68,8 +61,7 @@ impl Upsampler {
             move |(component, data, line_buffer)| {
                 component.upsampler.upsample_row(
                     data,
-                    component.width,
-                    component.height,
+                    component.size,
                     component.row_stride,
                     row,
                     output_width,
@@ -93,11 +85,10 @@ struct UpsamplerGeneric {
 fn choose_upsampler(
     sampling_factors: (u8, u8),
     max_sampling_factors: (u8, u8),
-    output_width: u16,
-    output_height: u16,
+    output_size: Dimensions,
 ) -> Result<Upsample> {
-    let h1 = sampling_factors.0 == max_sampling_factors.0 || output_width == 1;
-    let v1 = sampling_factors.1 == max_sampling_factors.1 || output_height == 1;
+    let h1 = sampling_factors.0 == max_sampling_factors.0 || output_size.width == 1;
+    let v1 = sampling_factors.1 == max_sampling_factors.1 || output_size.height == 1;
     let h2 = sampling_factors.0 * 2 == max_sampling_factors.0;
     let v2 = sampling_factors.1 * 2 == max_sampling_factors.1;
 
@@ -137,59 +128,28 @@ impl Upsample {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
-        input_width: usize,
-        input_height: usize,
+        input_size: Dimensions,
         row_stride: usize,
         row: usize,
         output_width: usize,
         output: &'s mut Vec<u8>,
     ) -> &'s [u8] {
         match self {
-            Self::H1V1 => UpsamplerH1V1.upsample_row(
-                input,
-                input_width,
-                input_height,
-                row_stride,
-                row,
-                output_width,
-                output,
-            ),
-            Self::H2V1 => UpsamplerH2V1.upsample_row(
-                input,
-                input_width,
-                input_height,
-                row_stride,
-                row,
-                output_width,
-                output,
-            ),
-            Self::H1V2 => UpsamplerH1V2.upsample_row(
-                input,
-                input_width,
-                input_height,
-                row_stride,
-                row,
-                output_width,
-                output,
-            ),
-            Self::H2V2 => UpsamplerH2V2.upsample_row(
-                input,
-                input_width,
-                input_height,
-                row_stride,
-                row,
-                output_width,
-                output,
-            ),
-            Self::Generic(upsample) => upsample.upsample_row(
-                input,
-                input_width,
-                input_height,
-                row_stride,
-                row,
-                output_width,
-                output,
-            ),
+            Self::H1V1 => {
+                UpsamplerH1V1.upsample_row(input, input_size, row_stride, row, output_width, output)
+            }
+            Self::H2V1 => {
+                UpsamplerH2V1.upsample_row(input, input_size, row_stride, row, output_width, output)
+            }
+            Self::H1V2 => {
+                UpsamplerH1V2.upsample_row(input, input_size, row_stride, row, output_width, output)
+            }
+            Self::H2V2 => {
+                UpsamplerH2V2.upsample_row(input, input_size, row_stride, row, output_width, output)
+            }
+            Self::Generic(upsample) => {
+                upsample.upsample_row(input, input_size, row_stride, row, output_width, output)
+            }
         }
     }
 }
@@ -198,15 +158,13 @@ impl UpsamplerH1V1 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
-        _input_width: usize,
-        _input_height: usize,
+        _input_size: Dimensions,
         row_stride: usize,
         row: usize,
         output_width: usize,
         _output: &'s mut Vec<u8>,
     ) -> &'s [u8] {
-        let input = &input[row * row_stride..];
-        &input[..output_width]
+        &input[row * row_stride..][..output_width]
     }
 }
 
@@ -214,8 +172,7 @@ impl UpsamplerH2V1 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
-        input_width: usize,
-        _input_height: usize,
+        input_size: Dimensions,
         row_stride: usize,
         row: usize,
         output_width: usize,
@@ -223,7 +180,9 @@ impl UpsamplerH2V1 {
     ) -> &'s [u8] {
         output.resize(output_width, 0);
 
-        let input = &input[row * row_stride..];
+        let input_width = usize::from(input_size.width);
+
+        let input = &input[row * row_stride..][..output_width];
 
         if input_width == 1 {
             output[0] = input[0];
@@ -253,14 +212,15 @@ impl UpsamplerH1V2 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
-        _input_width: usize,
-        input_height: usize,
+        input_size: Dimensions,
         row_stride: usize,
         row: usize,
         output_width: usize,
         output: &'s mut Vec<u8>,
     ) -> &'s [u8] {
         output.resize(output_width, 0);
+
+        let input_height = input_size.height;
 
         debug_assert!(output.len() == output_width); // TODO Remove output_width
 
@@ -284,13 +244,16 @@ impl UpsamplerH2V2 {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
-        input_width: usize,
-        input_height: usize,
+        input_size: Dimensions,
         row_stride: usize,
         row: usize,
         _output_width: usize,
         output: &'s mut Vec<u8>,
     ) -> &'s [u8] {
+        let (input_width, input_height) = (
+            usize::from(input_size.width),
+            usize::from(input_size.height),
+        );
         output.resize(input_width * 2, 0);
 
         let row_near = row as f32 / 2.0;
@@ -334,8 +297,7 @@ impl UpsamplerGeneric {
     fn upsample_row<'s>(
         &self,
         input: &'s [u8],
-        input_width: usize,
-        _input_height: usize,
+        input_size: Dimensions,
         row_stride: usize,
         row: usize,
         output_width: usize,
@@ -343,8 +305,8 @@ impl UpsamplerGeneric {
     ) -> &'s [u8] {
         output.resize(output_width, 0);
 
-        let start = (row / self.vertical_scaling_factor as usize) * row_stride;
-        let input = &input[start..(start + input_width)];
+        let start = (row / usize::from(self.vertical_scaling_factor)) * row_stride;
+        let input = &input[start..(start + usize::from(input_size.width))];
         for (out_chunk, val) in output
             .chunks_exact_mut(usize::from(self.horizontal_scaling_factor))
             .zip(input)

@@ -1400,8 +1400,13 @@ where
                 is_jfif,
                 input.state.color_transform,
             )?;
-            let upsampler =
-                upsampler::Upsampler::new(&frame.components, frame.samples_per_line, frame.lines)?;
+            let upsampler = upsampler::Upsampler::new(
+                &frame.components,
+                Dimensions {
+                    width: frame.samples_per_line,
+                    height: frame.lines,
+                },
+            )?;
             let line_size = width * frame.components.len();
             let mut image = vec![0u8; line_size * height];
 

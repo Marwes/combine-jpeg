@@ -923,36 +923,32 @@ impl Decoder {
             if result.len() >= mcu_offset {
                 let component_result = &mut result[mcu_offset..];
 
-                let mut iter = ColumnPrefixes::new(
-                    component_result,
+                for y_offset in step_range(
                     usize::from(component.vertical_sampling_factor),
                     component.line_stride * DCT_SIZE,
-                );
-                while let Some(component_result_start) = iter.next() {
-                    let mut iter = ColumnPrefixes::new(
-                        component_result_start,
-                        usize::from(component.horizontal_sampling_factor),
-                        DCT_SIZE,
-                    );
-                    while let Some(dct) = iter.next() {
-                        let coefficients_chunk =
+                ) {
+                    if component_result.len() >= y_offset {
+                        let component_result_start =
+                            unsafe { component_result.get_unchecked_mut(y_offset..) };
+
+                        for x in
+                            step_range(usize::from(component.horizontal_sampling_factor), DCT_SIZE)
+                        {
+                            let coefficients_chunk =
+                                coefficients_chunks.next().expect("Missing coefficients");
+                            let output = unsafe { component_result_start.get_unchecked_mut(x..) }
+                                .chunks_mut(component.line_stride)
+                                .map(|chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE));
+                            idct::dequantize_and_idct_block(
+                                fixed_slice!(coefficients_chunk; BLOCK_SIZE),
+                                &quantization_table.0,
+                                output,
+                            );
+                        }
+                    } else {
+                        for _ in 0..component.horizontal_sampling_factor {
                             coefficients_chunks.next().expect("Missing coefficients");
-                        let output = dct
-                            .chunks_mut(component.line_stride)
-                            .map(|chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE));
-                        idct::dequantize_and_idct_block(
-                            fixed_slice!(coefficients_chunk; BLOCK_SIZE),
-                            &quantization_table.0,
-                            output,
-                        );
-                    }
-                }
-                if usize::from(component.horizontal_sampling_factor)
-                    .checked_mul(DCT_SIZE)
-                    .is_none()
-                {
-                    for _ in 0..component.horizontal_sampling_factor {
-                        coefficients_chunks.next().expect("Missing coefficients");
+                        }
                     }
                 }
             } else {
@@ -1683,30 +1679,5 @@ impl Iterator for StepRange {
         } else {
             None
         }
-    }
-}
-
-struct ColumnPrefixes<'a, T> {
-    data: &'a mut [T],
-    steps: StepRange,
-}
-
-impl<'a, T> ColumnPrefixes<'a, T> {
-    fn new(data: &'a mut [T], mut steps: usize, stride: usize) -> Self {
-        if steps.checked_mul(stride).is_none() {
-            steps -= 1;
-        }
-        assert!(data.len() >= steps.checked_mul(stride).unwrap());
-        ColumnPrefixes {
-            data,
-            steps: step_range(steps, stride),
-        }
-    }
-    #[inline]
-    fn next(&mut self) -> Option<&mut [T]> {
-        let i = self.steps.next()?;
-        // SAFETY `steps` will not yield a larger `i` than `steps * stride`, checked by the
-        // constructor
-        Some(unsafe { self.data.get_unchecked_mut(i..) })
     }
 }

@@ -75,6 +75,15 @@ impl<'a> FromBytes<'a> for &'a [u8] {
     }
 }
 
+impl<'a, S> FromBytes<'a> for combine::stream::MaybePartialStream<S>
+where
+    S: FromBytes<'a>,
+{
+    fn from_bytes(bs: &'a [u8]) -> Self {
+        combine::stream::MaybePartialStream(S::from_bytes(bs), false)
+    }
+}
+
 impl<'a, S> FromBytes<'a> for PartialStream<S>
 where
     S: FromBytes<'a>,
@@ -1559,12 +1568,10 @@ impl tokio_util::codec::Decoder for DecoderCodec {
 }
 
 pub struct ReadDecoder<R> {
-    reader: R,
+    combine_decoder: combine::stream::Decoder<R, AnySendPartialState>,
     decoder: Decoder,
-    state: AnySendPartialState,
     bits: u64,
     count: u8,
-    remaining: Vec<u8>,
 }
 
 impl<R> ReadDecoder<R>
@@ -1573,85 +1580,47 @@ where
 {
     pub fn new(reader: R) -> Self {
         ReadDecoder {
-            reader,
+            combine_decoder: combine::stream::Decoder::new(reader),
             decoder: Decoder::default(),
-            state: Default::default(),
-            remaining: Default::default(),
             bits: 0,
             count: 0,
         }
     }
 
     pub fn decode(&mut self) -> Result<Vec<u8>, IoError> {
-        loop {
-            let remaining_data = self.remaining.len();
+        use std::io;
 
-            let (opt, mut removed) = {
-                let buffer = self.reader.fill_buf()?;
-                if buffer.len() == 0 {
-                    return Err("Could not read enough bytes".into());
-                }
-                let buffer = if !self.remaining.is_empty() {
-                    self.remaining.extend(buffer);
-                    &self.remaining[..]
-                } else {
-                    buffer
-                };
-                let mut stream = DecoderStream::with_state(
-                    &mut self.decoder,
-                    combine::easy::Stream(combine::stream::PartialStream(buffer)),
-                    self.bits,
-                    self.count,
-                );
+        #[derive(derive_more::From)]
+        enum InternalError<'a> {
+            Parse(easy::Errors<u8, &'a [u8], combine::stream::PointerOffset<[u8]>>),
 
-                let result = combine::stream::decode(decode_parser(), &mut stream, &mut self.state);
-
-                self.bits = stream.stream.bits;
-                self.count = stream.stream.count;
-
-                match result {
-                    Ok(x) => x,
-                    Err(err) => {
-                        return Err(err
-                            .map_position(|pos| pos.translate_position(buffer))
-                            .map_token(|token| format!("0x{:X}", token))
-                            .map_range(|range| format!("{:?}", range))
-                            .into());
-                    }
-                }
-            };
-
-            if !self.remaining.is_empty() {
-                // Remove the data we have parsed and adjust `removed` to be the amount of data we
-                // consumed from `self.reader`
-                self.remaining.drain(..removed);
-                if removed >= remaining_data {
-                    removed = removed - remaining_data;
-                } else {
-                    removed = 0;
-                }
-            }
-
-            match opt {
-                Some(value) => {
-                    self.reader.consume(removed);
-                    return Ok(value?);
-                }
-                None => {
-                    // We have not enough data to produce a Value but we know that all the data of
-                    // the current buffer are necessary. Consume all the buffered data to ensure
-                    // that the next iteration actually reads more data.
-                    let buffer_len = {
-                        let buffer = self.reader.fill_buf()?;
-                        if remaining_data == 0 {
-                            self.remaining.extend(&buffer[removed..]);
-                        }
-                        buffer.len()
-                    };
-                    self.reader.consume(buffer_len);
-                }
-            }
+            IO(io::Error),
         }
+
+        let start = self.combine_decoder.position();
+        let decoder = &mut self.decoder;
+        let bits = &mut self.bits;
+        let count = &mut self.count;
+        combine::decode!(
+            &mut self.combine_decoder,
+            decode_parser(),
+            |stream| {
+                DecoderStream::with_state(decoder, combine::easy::Stream(stream), *bits, *count)
+            },
+            |stream| {
+                *bits = stream.stream.bits;
+                *count = stream.stream.count;
+            }
+        )
+        .map_err(|err: InternalError<'_>| match err {
+            InternalError::Parse(err) => err
+                .map_position(|offset| start + offset.0)
+                .map_token(|token| format!("0x{:X}", token))
+                .map_range(|range| format!("{:?}", range))
+                .into(),
+            InternalError::IO(err) => err.into(),
+        })
+        .and_then(|result| result.map_err(From::from))
     }
 }
 

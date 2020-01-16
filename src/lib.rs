@@ -1568,7 +1568,9 @@ impl tokio_util::codec::Decoder for DecoderCodec {
 }
 
 pub struct ReadDecoder<R> {
-    combine_decoder: combine::stream::Decoder<R, AnySendPartialState>,
+    combine_decoder:
+        combine::stream::Decoder<AnySendPartialState, combine::stream::PointerOffset<[u8]>>,
+    reader: R,
     decoder: Decoder,
     bits: u64,
     count: u8,
@@ -1580,7 +1582,8 @@ where
 {
     pub fn new(reader: R) -> Self {
         ReadDecoder {
-            combine_decoder: combine::stream::Decoder::new(reader),
+            combine_decoder: combine::stream::Decoder::new(),
+            reader,
             decoder: Decoder::default(),
             bits: 0,
             count: 0,
@@ -1588,37 +1591,32 @@ where
     }
 
     pub fn decode(&mut self) -> Result<Vec<u8>, IoError> {
-        use std::io;
+        use combine::stream::decoder;
 
-        #[derive(derive_more::From)]
-        enum InternalError<'a> {
-            Parse(easy::Errors<u8, &'a [u8], combine::stream::PointerOffset<[u8]>>),
-
-            IO(io::Error),
-        }
-
-        let start = self.combine_decoder.position();
+        let mut start = *self.combine_decoder.position();
         let decoder = &mut self.decoder;
         let bits = &mut self.bits;
         let count = &mut self.count;
         combine::decode!(
             &mut self.combine_decoder,
+            &mut self.reader,
             decode_parser(),
-            |stream| {
+            |stream, _| {
                 DecoderStream::with_state(decoder, combine::easy::Stream(stream), *bits, *count)
             },
             |stream| {
+                start = stream.position();
                 *bits = stream.stream.bits;
                 *count = stream.stream.count;
             }
         )
-        .map_err(|err: InternalError<'_>| match err {
-            InternalError::Parse(err) => err
-                .map_position(|offset| start + offset.0)
+        .map_err(|err| match err {
+            decoder::Error::Parse(err) => err
+                .map_position(|offset| offset.0 - start.0)
                 .map_token(|token| format!("0x{:X}", token))
                 .map_range(|range| format!("{:?}", range))
                 .into(),
-            InternalError::IO(err) => err.into(),
+            decoder::Error::Io { error, .. } => error.into(),
         })
         .and_then(|result| result.map_err(From::from))
     }

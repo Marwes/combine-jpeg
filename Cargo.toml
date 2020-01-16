@@ -9,7 +9,7 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "0.4"
-combine = { version = "4.0.0-beta.1", path = "../combine" }
+combine = "4.0.0"
 derive_more = "0.15"
 itertools = "0.8"
 log = "0.4"

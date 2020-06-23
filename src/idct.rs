@@ -21,11 +21,6 @@ pub fn dequantize_and_idct_block<'a, I>(
     I: IntoIterator<Item = &'a mut [u8; 8]>,
     I::IntoIter: ExactSizeIterator<Item = &'a mut [u8; 8]>,
 {
-    #[inline(always)]
-    fn dequantize(c: i16, q: u16) -> Wrapping<i32> {
-        Wrapping(i32::from(c) * i32::from(q))
-    }
-
     let output = output.into_iter();
     debug_assert!(
         output.len() >= 8,
@@ -107,8 +102,8 @@ pub fn dequantize_and_idct_block<'a, I>(
         // to encode as 0..255 by adding 128, so we'll add that before the shift
         const X_SCALE: i32 = 65536 + (128 << 17);
 
-        let [s0, s1, s2, s3, s4, s5, s6, s7] = chunk;
-        if s1.0 == 0 && s2.0 == 0 && s3.0 == 0 && s4.0 == 0 && s5.0 == 0 && s6.0 == 0 && s7.0 == 0 {
+        let [s0, rest @ ..] = chunk;
+        if *rest == [Wrapping(0); 7] {
             let dcterm = stbi_clamp((stbi_fsh(*s0) + Wrapping(X_SCALE)) >> 17);
             output_chunk[0] = dcterm;
             output_chunk[1] = dcterm;
@@ -221,4 +216,9 @@ fn stbi_f2f(x: f32) -> Wrapping<i32> {
 #[inline]
 const fn stbi_fsh(x: Wrapping<i32>) -> Wrapping<i32> {
     Wrapping(x.0 << 12)
+}
+
+#[inline(always)]
+fn dequantize(c: i16, q: u16) -> Wrapping<i32> {
+    Wrapping(i32::from(c) * i32::from(q))
 }

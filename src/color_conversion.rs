@@ -2,7 +2,25 @@ use itertools::izip;
 
 use crate::AdobeColorTransform;
 
-pub(crate) type ColorConvertFunc = fn(&mut [u8], &[&[u8]]);
+#[derive(Copy, Clone)]
+pub(crate) enum ColorConvertFunc {
+    Null,
+    Ycbcr,
+    Ycck,
+    Cmyk,
+}
+
+impl ColorConvertFunc {
+    #[inline]
+    pub(crate) fn convert(self, data: &mut [u8], input: &[&[u8]]) {
+        match self {
+            Self::Null => color_convert_line_null(data, input),
+            Self::Ycbcr => color_convert_line_ycbcr(data, input),
+            Self::Ycck => color_convert_line_ycck(data, input),
+            Self::Cmyk => color_convert_line_cmyk(data, input),
+        }
+    }
+}
 
 pub(crate) fn choose_color_convert_func(
     component_count: usize,
@@ -14,16 +32,16 @@ pub(crate) fn choose_color_convert_func(
             // http://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
             // Unknown means the data is RGB, so we don't need to perform any color conversion on it.
             if color_transform == Some(AdobeColorTransform::Unknown) {
-                Ok(color_convert_line_null)
+                Ok(ColorConvertFunc::Null)
             } else {
-                Ok(color_convert_line_ycbcr)
+                Ok(ColorConvertFunc::Ycbcr)
             }
         }
         4 => {
             // http://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
             match color_transform {
-                Some(AdobeColorTransform::Unknown) => Ok(color_convert_line_cmyk),
-                Some(_) => Ok(color_convert_line_ycck),
+                Some(AdobeColorTransform::Unknown) => Ok(ColorConvertFunc::Cmyk),
+                Some(_) => Ok(ColorConvertFunc::Ycck),
                 None => Err("4 components without Adobe APP14 metadata to tell color space"),
             }
         }

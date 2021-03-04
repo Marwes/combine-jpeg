@@ -205,6 +205,14 @@ impl Frame {
             i => panic!("Unknown SOF marker {}", i),
         }
     }
+
+    fn max_vertical_sampling_factor(&self) -> u8 {
+        self.components
+            .iter()
+            .map(|comp| comp.vertical_sampling_factor)
+            .max()
+            .unwrap()
+    }
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -229,16 +237,39 @@ pub struct Component {
 
 const MAX_BLOCKS_IN_MCU: u8 = 10; // From mozjpeg
 
-fn sof<'a, I>(marker_index: u8) -> impl Parser<I, Output = Frame, PartialState = ()>
+fn check_sampling_factor<I>(s: u8) -> Result<(), StreamErrorFor<I>>
+where
+    I: StreamOnce,
+{
+    /// JPEG limit on sampling factors
+    const MAX_SAMPLING_FACTOR: u8 = 4;
+    if s == 0 || s > MAX_SAMPLING_FACTOR {
+        Err(StreamErrorFor::<I>::message_format(format_args!(
+            "Invalid sampling factor `{}`",
+            s
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn sof<'a, I>(marker_index: u8) -> impl Parser<I, Output = Frame, PartialState = ()> + Captures<'a>
 where
     I: Send + RangeStream<Token = u8, Range = &'a [u8]>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
 {
+    let sampling_factors = || {
+        split_4_bit().and_then(|(h, v)| -> Result<_, StreamErrorFor<I>> {
+            check_sampling_factor::<I>(h)?;
+            check_sampling_factor::<I>(v)?;
+            Ok((h, v))
+        })
+    };
     no_partial(
         (any(), be_u16(), be_u16(), any())
             .then_partial(
                 move |&mut (precision, lines, samples_per_line, components_in_frame)| {
-                    let component = (any(), split_4_bit(), any()).map(
+                    let component = (any(), sampling_factors(), any()).map(
                         |(
                             component_identifier,
                             (horizontal_sampling_factor, vertical_sampling_factor),
@@ -1437,11 +1468,15 @@ where
     let line_size = width * frame.components.len();
     let mut image = vec![0u8; line_size * height];
 
-    let f = |line_buffers: &mut ComponentVec<_>, row: usize, line: &mut [u8]| {
+    let max_vertical_sampling_factor = usize::from(frame.max_vertical_sampling_factor());
+
+    let f = |line_buffers: &mut ComponentVec<_>, row: usize, lines: &mut [&mut [u8]]| {
         let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
         colors.extend(upsampler.upsample_and_interleave_row(line_buffers, data, row, width));
 
-        color_convert_func(line, &colors);
+        for line in lines {
+            color_convert_func.convert(line, &colors);
+        }
     };
 
     let mut line_buffers = ComponentVec::new();
@@ -1449,20 +1484,31 @@ where
 
     #[cfg(not(feature = "rayon"))]
     {
-        image
-            .chunks_mut(line_size)
-            .enumerate()
-            .for_each(|(row, line)| f(&mut line_buffers, row, line));
+        let mut lines = ArrayVec::<[_; 16]>::new();
+        let mut iter = image.chunks_mut(line_size).enumerate();
+        while let Some((row, line)) = iter.next() {
+            lines.push(line);
+            while lines.len() < max_vertical_sampling_factor {
+                if let Some((_, line)) = iter.next() {
+                    lines.push(line);
+                } else {
+                    break;
+                }
+            }
+            f(&mut line_buffers, row, &mut lines);
+            lines.clear();
+        }
     }
 
     #[cfg(feature = "rayon")]
     {
-        image.par_chunks_mut(line_size).enumerate().for_each_with(
-            line_buffers,
-            |line_buffers, (row, line)| {
-                f(line_buffers, row, line);
-            },
-        );
+        image
+            .par_chunks_mut(line_size)
+            .chunks(max_vertical_sampling_factor)
+            .enumerate()
+            .for_each_with(line_buffers, |line_buffers, (row, mut lines)| {
+                f(line_buffers, row, &mut lines);
+            });
     }
 
     Ok(image)

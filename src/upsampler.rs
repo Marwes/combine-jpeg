@@ -164,7 +164,8 @@ impl UpsamplerH1V1 {
         output_width: usize,
         _output: &'s mut Vec<u8>,
     ) -> &'s [u8] {
-        &input[row * row_stride..][..output_width]
+        let start = row * row_stride;
+        &input[start..start + output_width]
     }
 }
 
@@ -182,7 +183,8 @@ impl UpsamplerH2V1 {
 
         let input_width = usize::from(input_size.width);
 
-        let input = &input[row * row_stride..][..output_width];
+        let start = row * row_stride;
+        let input = &input[start..start + output_width];
 
         if input_width == 1 {
             output[0] = input[0];

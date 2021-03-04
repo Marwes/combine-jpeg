@@ -945,12 +945,12 @@ impl Decoder {
                         {
                             let coefficients_chunk =
                                 coefficients_chunks.next().expect("Missing coefficients");
-                            let output = unsafe { component_result_start.get_unchecked_mut(x..) }
-                                .chunks_mut(component.line_stride)
-                                .map(|chunk| fixed_slice_mut!(&mut chunk[..DCT_SIZE]; DCT_SIZE));
+                            let output = unsafe { component_result_start.get_unchecked_mut(x..) };
                             idct::dequantize_and_idct_block(
+                                DCT_SIZE,
                                 fixed_slice!(coefficients_chunk; BLOCK_SIZE),
                                 &quantization_table.0,
+                                component.line_stride,
                                 output,
                             );
                         }

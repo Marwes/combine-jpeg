@@ -1396,67 +1396,76 @@ where
             })),
         )
         .skip(marker()) // EOI Marker
-        .map_input(|_, input: &mut DecoderStream<'s, I>| {
-            let is_jfif = false; // TODO
-
-            let frame = input.state.frame.as_ref().unwrap(); // FIXME
-
-            let height = usize::from(frame.lines);
-            let width = usize::from(frame.samples_per_line);
-
-            let data = &input.state.planes;
-
-            let color_convert_func = color_conversion::choose_color_convert_func(
-                frame.components.len(),
-                is_jfif,
-                input.state.color_transform,
-            )?;
-            let upsampler = upsampler::Upsampler::new(
-                &frame.components,
-                Dimensions {
-                    width: frame.samples_per_line,
-                    height: frame.lines,
-                },
-            )?;
-            let line_size = width * frame.components.len();
-            let mut image = vec![0u8; line_size * height];
-
-            let f = |line_buffers: &mut ComponentVec<_>, row: usize, line: &mut [u8]| {
-                let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
-                colors.extend(upsampler.upsample_and_interleave_row(
-                    line_buffers,
-                    data,
-                    row,
-                    width,
-                ));
-
-                color_convert_func(line, &colors);
-            };
-
-            let mut line_buffers = ComponentVec::new();
-            line_buffers.extend(std::iter::repeat(Vec::new()).take(4));
-
-            #[cfg(not(feature = "rayon"))]
-            {
-                image
-                    .chunks_mut(line_size)
-                    .enumerate()
-                    .for_each(|(row, line)| f(&mut line_buffers, row, line));
-            }
-
-            #[cfg(feature = "rayon")]
-            {
-                image.par_chunks_mut(line_size).enumerate().for_each_with(
-                    line_buffers,
-                    |line_buffers, (row, line)| {
-                        f(line_buffers, row, line);
-                    },
-                );
-            }
-
-            Ok(image)
-        }),
+        .map_input(|_, input| upsample(input)),
     )
+}
+
+fn upsample<'a, 's, I>(input: &mut DecoderStream<'s, I>) -> Result<Vec<u8>>
+where
+    I: Send + RangeStream<Token = u8, Range = &'a [u8]> + FromBytes<'a> + 'a,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    DecoderStream<'s, I>: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
+    <DecoderStream<'s, I> as StreamOnce>::Error: ParseError<
+        <DecoderStream<'s, I> as StreamOnce>::Token,
+        <DecoderStream<'s, I> as StreamOnce>::Range,
+        <DecoderStream<'s, I> as StreamOnce>::Position,
+    >,
+    I::Position: Default + fmt::Display,
+    's: 'a,
+{
+    let is_jfif = false; // TODO
+
+    let frame = input.state.frame.as_ref().unwrap(); // FIXME
+
+    let height = usize::from(frame.lines);
+    let width = usize::from(frame.samples_per_line);
+
+    let data = &input.state.planes;
+
+    let color_convert_func = color_conversion::choose_color_convert_func(
+        frame.components.len(),
+        is_jfif,
+        input.state.color_transform,
+    )?;
+    let upsampler = upsampler::Upsampler::new(
+        &frame.components,
+        Dimensions {
+            width: frame.samples_per_line,
+            height: frame.lines,
+        },
+    )?;
+    let line_size = width * frame.components.len();
+    let mut image = vec![0u8; line_size * height];
+
+    let f = |line_buffers: &mut ComponentVec<_>, row: usize, line: &mut [u8]| {
+        let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
+        colors.extend(upsampler.upsample_and_interleave_row(line_buffers, data, row, width));
+
+        color_convert_func(line, &colors);
+    };
+
+    let mut line_buffers = ComponentVec::new();
+    line_buffers.extend(std::iter::repeat(Vec::new()).take(4));
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        image
+            .chunks_mut(line_size)
+            .enumerate()
+            .for_each(|(row, line)| f(&mut line_buffers, row, line));
+    }
+
+    #[cfg(feature = "rayon")]
+    {
+        image.par_chunks_mut(line_size).enumerate().for_each_with(
+            line_buffers,
+            |line_buffers, (row, line)| {
+                f(line_buffers, row, line);
+            },
+        );
+    }
+
+    Ok(image)
 }
 
 fn do_segment<'a, 's, I>(

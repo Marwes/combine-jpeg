@@ -1598,8 +1598,8 @@ where
         let bits = &mut self.bits;
         let count = &mut self.count;
         combine::decode!(
-            &mut self.combine_decoder,
-            &mut self.reader,
+            self.combine_decoder,
+            self.reader,
             decode_parser(),
             |stream, _| {
                 DecoderStream::with_state(decoder, combine::easy::Stream(stream), *bits, *count)

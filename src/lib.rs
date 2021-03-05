@@ -426,12 +426,7 @@ impl<'a, T> UnZigZag<'a, T> {
     }
 
     pub fn write(&mut self, value: T) {
-        // SAFETY UNZIGZAG only contains values in 0..64 and `index` is always in the range 0..64
-        unsafe {
-            *self.out.get_unchecked_mut(usize::from(
-                *UNZIGZAG.get_unchecked(usize::from(self.index)),
-            )) = value;
-        }
+        unzigzag(self.out, self.index, value);
     }
 
     pub fn step(mut self, steps: u8) -> Option<Self> {
@@ -451,7 +446,7 @@ const UNZIGZAG: [u8; 64] = [
 ];
 
 fn unzigzag<T>(out: &mut [T; 64], index: u8, value: T) {
-    // SAFETY UNZIGZAG only contains values in 0..64
+    // SAFETY UNZIGZAG only contains values in 0..64 and `index` is always in the range 0..64
     unsafe {
         *out.get_unchecked_mut(usize::from(UNZIGZAG[usize::from(index)])) = value;
     }
@@ -960,23 +955,18 @@ impl Decoder {
             let mcu_offset = usize::from(mcu_y) * component.bytes_per_mcu_line
                 + usize::from(mcu_x) * usize::from(component.mcu_sample_size.width);
 
-            if result.len() >= mcu_offset {
-                let component_result = &mut result[mcu_offset..];
-
+            if let Some(component_result) = result.get_mut(mcu_offset..) {
                 for y_offset in step_range(
                     usize::from(component.vertical_sampling_factor),
                     component.line_stride * DCT_SIZE,
                 ) {
-                    if component_result.len() >= y_offset {
-                        let component_result_start =
-                            unsafe { component_result.get_unchecked_mut(y_offset..) };
-
+                    if let Some(component_result_start) = component_result.get_mut(y_offset..) {
                         for x in
                             step_range(usize::from(component.horizontal_sampling_factor), DCT_SIZE)
                         {
                             let coefficients_chunk =
                                 coefficients_chunks.next().expect("Missing coefficients");
-                            let output = unsafe { component_result_start.get_unchecked_mut(x..) };
+                            let output = &mut component_result_start[x..];
                             idct::dequantize_and_idct_block(
                                 DCT_SIZE,
                                 fixed_slice!(coefficients_chunk; BLOCK_SIZE),
@@ -1315,12 +1305,7 @@ where
                 .unwrap()
                 .headers
                 .iter()
-                .map(move |header| {
-                    mem::replace(
-                        &mut results[usize::from(header.component_index)],
-                        Default::default(),
-                    )
-                })
+                .map(move |header| mem::take(&mut results[usize::from(header.component_index)]))
                 .collect()
         }),
     )

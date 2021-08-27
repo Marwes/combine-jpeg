@@ -344,14 +344,7 @@ fn dequantize_and_idct_block_8x8_inner<'a, I>(
         let [s0, rest @ ..] = chunk;
         if *rest == [Wrapping(0); 7] {
             let dcterm = stbi_clamp((stbi_fsh(*s0) + Wrapping(X_SCALE)) >> 17);
-            output_chunk[0] = dcterm;
-            output_chunk[1] = dcterm;
-            output_chunk[2] = dcterm;
-            output_chunk[3] = dcterm;
-            output_chunk[4] = dcterm;
-            output_chunk[5] = dcterm;
-            output_chunk[6] = dcterm;
-            output_chunk[7] = dcterm;
+            output_chunk.fill(dcterm);
         } else {
             let Kernel {
                 xs: [x0, x1, x2, x3],
@@ -479,10 +472,10 @@ fn dequantize_and_idct_block_4x4(
 
     // columns
     for i in 0..4 {
-        let s0 = Wrapping(coefficients[i + 8 * 0] as i32 * quantization_table[i + 8 * 0] as i32);
-        let s1 = Wrapping(coefficients[i + 8 * 1] as i32 * quantization_table[i + 8 * 1] as i32);
-        let s2 = Wrapping(coefficients[i + 8 * 2] as i32 * quantization_table[i + 8 * 2] as i32);
-        let s3 = Wrapping(coefficients[i + 8 * 3] as i32 * quantization_table[i + 8 * 3] as i32);
+        let s0 = dequantize(coefficients[i + 8 * 0], quantization_table[i + 8 * 0]);
+        let s1 = dequantize(coefficients[i + 8 * 1], quantization_table[i + 8 * 1]);
+        let s2 = dequantize(coefficients[i + 8 * 2], quantization_table[i + 8 * 2]);
+        let s3 = dequantize(coefficients[i + 8 * 3], quantization_table[i + 8 * 3]);
 
         let x0 = (s0 + s2) << PASS1_BITS;
         let x2 = (s0 - s2) << PASS1_BITS;
@@ -537,15 +530,15 @@ fn dequantize_and_idct_block_2x2(
     const SCALE_BITS: usize = 3;
 
     // Column 0
-    let s00 = Wrapping(coefficients[8 * 0] as i32 * quantization_table[8 * 0] as i32);
-    let s10 = Wrapping(coefficients[8 * 1] as i32 * quantization_table[8 * 1] as i32);
+    let s00 = dequantize(coefficients[8 * 0], quantization_table[8 * 0]);
+    let s10 = dequantize(coefficients[8 * 1], quantization_table[8 * 1]);
 
     let x0 = s00 + s10;
     let x2 = s00 - s10;
 
     // Column 1
-    let s01 = Wrapping(coefficients[8 * 0 + 1] as i32 * quantization_table[8 * 0 + 1] as i32);
-    let s11 = Wrapping(coefficients[8 * 1 + 1] as i32 * quantization_table[8 * 1 + 1] as i32);
+    let s01 = dequantize(coefficients[8 * 0 + 1], quantization_table[8 * 0 + 1]);
+    let s11 = dequantize(coefficients[8 * 1 + 1], quantization_table[8 * 1 + 1]);
 
     let x1 = s01 + s11;
     let x3 = s01 - s11;
@@ -570,7 +563,6 @@ fn dequantize_and_idct_block_1x1(
 ) {
     debug_assert_eq!(coefficients.len(), 64);
 
-    let s0 = (Wrapping(coefficients[0] as i32 * quantization_table[0] as i32) + Wrapping(128 * 8))
-        / Wrapping(8);
+    let s0 = (dequantize(coefficients[0], quantization_table[0]) + Wrapping(128 * 8)) / Wrapping(8);
     output[0] = stbi_clamp(s0);
 }

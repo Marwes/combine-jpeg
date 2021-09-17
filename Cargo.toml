@@ -8,27 +8,27 @@ license = "MIT / Apache-2.0"
 edition = "2018"
 
 [dependencies]
-arrayvec = "0.4"
-combine = "4.0.0"
-derive_more = "0.15"
-itertools = "0.8"
+arrayvec = "0.7"
+combine = "4.6"
+derive_more = "0.99"
+itertools = "0.10"
 log = "0.4"
 rayon = { version = "1", optional = true }
 
-bytes = "0.5"
-tokio-util = { version = "0.2", features = ["codec"] }
+bytes = "1"
+tokio-util = { version = "0.6", features = ["codec"] }
 
 [dev-dependencies]
 criterion = { version = "0.3", default-features = false }
-env_logger = "0.6"
-image = { version = "0.21", default-features = false, features = ["png_codec"] }
+env_logger = "0.9"
+image = { version = "0.23", default-features = false, features = ["png"] }
 partial-io = { version = "0.3", features = ["quickcheck", "tokio"] }
-quickcheck = "0.6"
-quickcheck_macros = "0.8"
+quickcheck = "1"
+quickcheck_macros = "1"
 futures = "0.3"
-tokio = "0.2"
+tokio = "1"
 
-mozjpeg = { version = "0.8", features = ["with_simd", "nasm_simd"] }
+mozjpeg = { version = "0.9", features = ["with_simd", "nasm_simd"] }
 jpeg-decoder = { version = "0.1", default-features = false } # Disable multithreaded decoding since no other decoder uses it
 
 [[bench]]

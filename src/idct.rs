@@ -490,11 +490,8 @@ fn dequantize_and_idct_block_4x4(
         temp[i + 4 * 2] = x2 - t0;
     }
 
-    for i in 0..4 {
-        let s0 = temp[i * 4 + 0];
-        let s1 = temp[i * 4 + 1];
-        let s2 = temp[i * 4 + 2];
-        let s3 = temp[i * 4 + 3];
+    for (i, chunk) in temp.chunks_exact(4).enumerate() {
+        let &[s0, s1, s2, s3] = <&[_; 4]>::try_from(chunk).unwrap();
 
         let x0 = (s0 + s2) << CONST_BITS;
         let x2 = (s0 - s2) << CONST_BITS;

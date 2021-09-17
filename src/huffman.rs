@@ -221,7 +221,7 @@ impl AcTable {
     }
 }
 
-fn huffsize(bits: &[u8; 16]) -> Result<ArrayVec<[u8; 256]>, &'static str> {
+fn huffsize(bits: &[u8; 16]) -> Result<ArrayVec<u8, 256>, &'static str> {
     let mut huffsize = ArrayVec::new();
     for (l, &value) in bits.iter().enumerate() {
         let value = usize::from(value);

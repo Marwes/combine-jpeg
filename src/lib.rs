@@ -106,7 +106,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 const MAX_COMPONENTS: usize = 4;
 
-type ComponentVec<T> = ArrayVec<[T; MAX_COMPONENTS]>;
+type ComponentVec<T> = ArrayVec<T, MAX_COMPONENTS>;
 
 fn zero_data(data: &mut [i16]) {
     unsafe {
@@ -184,7 +184,7 @@ enum CodingProcess {
     LossLess,
 }
 
-type Components = ArrayVec<[Component; 256]>;
+type Components = ArrayVec<Component, 256>;
 
 pub struct Frame {
     pub marker_index: u8,
@@ -1456,7 +1456,7 @@ where
     let max_vertical_sampling_factor = usize::from(frame.max_vertical_sampling_factor());
 
     let f = |line_buffers: &mut ComponentVec<_>, row: usize, lines: &mut [&mut [u8]]| {
-        let mut colors = ArrayVec::<[_; MAX_COMPONENTS]>::new();
+        let mut colors = ArrayVec::<_, MAX_COMPONENTS>::new();
         colors.extend(upsampler.upsample_and_interleave_row(line_buffers, data, row, width));
 
         for line in lines {
@@ -1469,7 +1469,7 @@ where
 
     #[cfg(not(feature = "rayon"))]
     {
-        let mut lines = ArrayVec::<[_; 16]>::new();
+        let mut lines = ArrayVec::<_, 16>::new();
         let mut iter = image.chunks_mut(line_size).enumerate();
         while let Some((row, line)) = iter.next() {
             lines.push(line);

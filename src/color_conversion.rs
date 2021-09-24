@@ -66,13 +66,12 @@ fn color_convert_line_ycbcr(data: &mut [u8], input: &[&[u8]]) {
 }
 
 fn color_convert_line_ycck(data: &mut [u8], input: &[&[u8]]) {
-    let [y, cb, cr] = *fixed_slice!(input; 3);
+    let [y, cb, cr, k] = *fixed_slice!(input; 4);
 
-    for (chunk, &y, &cb, &cr) in izip!(data.chunks_exact_mut(4), y, cb, cr) {
+    for (chunk, &y, &cb, &cr, &k) in izip!(data.chunks_exact_mut(4), y, cb, cr, k) {
         let chunk = fixed_slice_mut!(chunk; 4);
 
         let [r, g, b] = ycbcr_to_rgb(y, cb, cr);
-        let k = chunk[3];
 
         chunk[0] = r;
         chunk[1] = g;
